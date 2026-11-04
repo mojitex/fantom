@@ -71,6 +71,9 @@ func Apply(body []byte, saverMode, codeMode string) ([]byte, Stats) {
 			stats.ToolResultsSeen++
 			stats.OriginalBytes += len(content)
 			compacted := compactToolOutput(content)
+			if len(compacted) >= len(content) {
+				compacted = content
+			}
 			stats.OptimizedBytes += len(compacted)
 			if compacted == content { continue }
 			message["content"], _ = json.Marshal(compacted)
@@ -112,7 +115,7 @@ func compactToolOutput(value string) string {
 		j := i + 1
 		for j < len(lines) && lines[j] == lines[i] && lines[i] != "" { j++ }
 		out = append(out, lines[i])
-		if j-i > 1 { out = append(out, "[previous line repeated "+strconv.Itoa(j-i-1)+" more times]") }
+		if j-i > 1 { out[len(out)-1] += " [x" + strconv.Itoa(j-i) + "]" }
 		i = j
 	}
 	return strings.Join(out, "\n")
