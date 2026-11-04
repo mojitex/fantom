@@ -10,9 +10,6 @@
       "api_keys_env": "NVIDIA_API_KEYS",
       "models": ["*"],
       "timeout_seconds": 100,
-      "headers": {
-        "Accept": "application/json"
-      }
     }
   ],
   "routes": {}
