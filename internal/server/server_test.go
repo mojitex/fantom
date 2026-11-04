@@ -80,8 +80,8 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 		MaxRequestBytes: 1 << 20,
 		Providers: []config.Provider{{
 			ID: "opencode-console",
-			BaseURL: upstream.URL + "/inference/openai/v1",
-			ChatPath: "/chat/completions",
+			BaseURL: upstream.URL + "/inference",
+			ChatPath: "/openai/v1/chat/completions",
 			ModelsURL: upstream.URL + "/inference/v1/models",
 			AuthType: "bearer",
 			APIKeys: []string{"oc_sk_test"},
