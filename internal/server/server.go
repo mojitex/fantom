@@ -262,8 +262,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstreamRequest.Header.Set("Accept", accept)
 	upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
 	// OpenCode Console uses this stable value to keep conversation routing and prompt caching consistent.
-	if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
+	if provider.config.ID == "opencode-console" {
+		if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
 		upstreamRequest.Header.Set("x-opencode-session", session)
+		}
 	}
 	s.applyProviderHeaders(upstreamRequest, provider, key)
 
