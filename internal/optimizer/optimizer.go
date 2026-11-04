@@ -21,7 +21,7 @@ func (s Stats) SavedBytes() int {
 	return saved
 }
 
-var ansiPattern = regexp.MustCompile(\`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])\`)
+var ansiPattern = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]|\x1b\\][^\x07]*(?:\x07|\x1b\\\\)|\x1b[@-_]")
 
 // Apply performs deterministic cleanup only on recognized shell-tool results.
 // User prompts, assistant messages and file-read results are untouched.
