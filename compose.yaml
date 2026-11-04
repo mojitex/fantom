@@ -16,6 +16,9 @@ services:
       STATIC_DIR: /app/dashboard
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       NVIDIA_API_KEYS: ${NVIDIA_API_KEYS:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      FANTOM_TOKEN_SAVER: ${FANTOM_TOKEN_SAVER:-safe}
+      FANTOM_CODE_MODE: ${FANTOM_CODE_MODE:-off}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}

@@ -62,9 +62,26 @@ export default function Home() {
           <div><span className="meta-label">API</span><strong>OPENAI-COMPATIBLE</strong></div>
         </div>
       </section>
+      <section className="models-panel">
+        <div className="section-heading">
+          <div><span className="section-kicker">01 / PROVIDERS</span><h2>Connected provider lanes</h2></div>
+          <span className="count">2 PROVIDERS</span>
+        </div>
+        <div className="provider-grid">
+          <article className="provider-card">
+            <span className="provider-mark nvidia">NV</span>
+            <div><strong>NVIDIA NIM</strong><span>API key · model catalog · 100s timeout</span></div>
+          </article>
+          <article className="provider-card">
+            <span className="provider-mark opencode">OC</span>
+            <div><strong>OpenCode Console</strong><span>Official Console API key · paid / Go models</span></div>
+          </article>
+        </div>
+        <p className="section-copy">OpenCode Free models remain available only through the official OpenCode client. Fantom connects to the supported Console API.</p>
+      </section>
       <section className="status-panel">
         <div className="section-heading">
-          <div><span className="section-kicker">01 / SYSTEM</span><h2>Gateway status</h2></div>
+          <div><span className="section-kicker">02 / SYSTEM</span><h2>Gateway status</h2></div>
           <span className={health ? "status-pill online" : healthError ? "status-pill offline" : "status-pill checking"}><span /> {health ? "OPERATIONAL" : healthError ? "UNAVAILABLE" : "CHECKING"}</span>
         </div>
         <div className="status-grid">
@@ -75,10 +92,10 @@ export default function Home() {
       </section>
       <section className="models-panel">
         <div className="section-heading">
-          <div><span className="section-kicker">02 / PROVIDERS</span><h2>Model catalog</h2></div>
+          <div><span className="section-kicker">03 / MODELS</span><h2>Model catalog</h2></div>
           <span className="count">{models.length.toString().padStart(2, "0")} MODELS</span>
         </div>
-        <p className="section-copy">Enter your gateway key to retrieve the model catalog from configured providers. The key is used only in this browser session and is not saved.</p>
+        <p className="section-copy">Enter your gateway key to retrieve models from the two configured providers. Your key is used only in this browser session and is not saved.</p>
         <form className="key-form" onSubmit={(event) => { event.preventDefault(); void loadModels(); }}>
           <label htmlFor="gateway-key">GATEWAY API KEY</label>
           <div className="key-row">
@@ -94,12 +111,27 @@ export default function Home() {
       </section>
       <section className="api-panel">
         <div className="section-heading">
-          <div><span className="section-kicker">03 / INTEGRATION</span><h2>Use the API</h2></div>
+          <div><span className="section-kicker">04 / OPTIMIZATION</span><h2>Token saver</h2></div>
+          <span className="count">OPT-IN PER REQUEST</span>
+        </div>
+        <div className="optimizer-row">
+          <div><strong>Safe tool-output cleanup</strong><span>ANSI, progress redraws, repeated lines and JSON whitespace</span></div>
+          <code>X-Fantom-Token-Saver: safe</code>
+        </div>
+        <div className="optimizer-row">
+          <div><strong>Compact code mode</strong><span>Minimal complete changes without skipping tests or safeguards</span></div>
+          <code>X-Fantom-Code-Mode: full</code>
+        </div>
+        <p className="footnote">User prompts, assistant content and file-read tool results are not rewritten. Estimated token savings are approximate (bytes ÷ 4).</p>
+      </section>
+      <section className="api-panel">
+        <div className="section-heading">
+          <div><span className="section-kicker">05 / INTEGRATION</span><h2>Use the API</h2></div>
           <span className="count">CHAT COMPLETIONS</span>
         </div>
         <div className="code-block">
           <div className="code-top"><span>REQUEST</span><span>POST /v1/chat/completions</span></div>
-          <pre>{"curl http://localhost:8090/v1/chat/completions \\\n  -H \"Authorization: Bearer YOUR_GATEWAY_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"model\": \"meta/your-model\",\n    \"messages\": [{\"role\":\"user\",\"content\":\"Hello\"}],\n    \"stream\": true\n  }'"}</pre>
+          <pre>{"curl http://localhost:8090/v1/chat/completions \\\n  -H \"Authorization: Bearer YOUR_GATEWAY_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-Fantom-Token-Saver: safe\" \\\n  -H \"X-Fantom-Code-Mode: full\" \\\n  -d '{\n    \"model\": \"meta/your-model\",\n    \"messages\": [{\"role\":\"user\",\"content\":\"Hello\"}],\n    \"stream\": true\n  }'"} </pre>
         </div>
         <p className="footnote">Base URL: <code>http://localhost:8090/v1</code> · Compatible clients can use this as their OpenAI API endpoint.</p>
       </section>

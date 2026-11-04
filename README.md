@@ -4,21 +4,28 @@ Fantom is a standalone, OpenAI-compatible AI Gateway built with Go and a TypeScr
 
 Docker Hub image: monsmain/fantom
 
-## Features in the first implementation
+## The two configured providers
 
-- OpenAI-compatible POST /v1/chat/completions endpoint.
-- OpenAI-compatible GET /v1/models catalog aggregation.
-- NVIDIA NIM configured out of the box.
-- Provider/model routing and public model aliases.
-- Multiple upstream API keys per provider with round-robin key selection.
-- Reusable HTTP connection pools, keep-alive and HTTP/2 negotiation.
-- SSE streaming forwarded incrementally without buffering the full generation.
+1. **NVIDIA NIM** — uses `NVIDIA_API_KEY` or a comma-separated key pool in `NVIDIA_API_KEYS`.
+2. **OpenCode Console** — uses an official personal or service-account API key in `OPENCODE_API_KEY`. The starter allowlist contains `kimi-k3`; add the exact model IDs enabled for your Console workspace to `configs/providers.json`.
+
+OpenCode's free-tier chat models are restricted to requests originating from the OpenCode client. Fantom does not impersonate that client or bypass that restriction; use Console models or a Go subscription through the documented API.
+
+## Features
+
+- OpenAI-compatible `POST /v1/chat/completions` and `GET /v1/models`.
+- Exactly two providers configured initially: NVIDIA NIM and OpenCode Console.
+- Provider-specific chat and model-catalog endpoints.
+- Multiple NVIDIA upstream keys with round-robin selection.
+- Reusable HTTP connection pools, keep-alive, HTTP/2 negotiation and incremental SSE forwarding.
 - Per-provider response-header timeout (100 seconds by default).
-- Optional outbound HTTP/HTTPS proxy through standard proxy environment variables.
-- Client API-key authentication, request IDs and JSON logs.
-- Go API and Next.js dashboard in one multi-architecture Docker image.
+- Optional outbound HTTP/HTTPS proxy.
+- Gateway API-key authentication, request IDs and structured JSON logs.
+- Opt-in code-generation modes inspired by Ponytail's minimal-change principles.
+- Safe command-tool result cleanup inspired by RTK's normalization approach.
+- One multi-architecture Docker image containing both API and dashboard.
 
-This is a clean foundation, not yet a feature-for-feature replacement for 8room. Persistent users, usage accounting, quotas, admin CRUD, advanced failover and database-backed settings are later milestones.
+This is an initial foundation, not yet a feature-for-feature replacement for 8room. Persistent users, usage accounting, quotas, admin CRUD, advanced failover and database-backed settings remain later milestones.
 
 ## Run with Docker Compose
 
@@ -28,13 +35,13 @@ This is a clean foundation, not yet a feature-for-feature replacement for 8room.
    cp .env.example .env
    ```
 
-   On Windows PowerShell:
+   Windows PowerShell:
 
    ```powershell
    Copy-Item .env.example .env
    ```
 
-2. Edit .env. Set a long random GATEWAY_API_KEY and your NVIDIA_API_KEY.
+2. Set a long random `GATEWAY_API_KEY`, your `NVIDIA_API_KEY`, and your official `OPENCODE_API_KEY`.
 
 3. Start Fantom:
 
@@ -44,16 +51,18 @@ This is a clean foundation, not yet a feature-for-feature replacement for 8room.
 
 4. Open the dashboard at http://localhost:8090.
 
-The default bind is 127.0.0.1:8090, so the service is not exposed to the public network. To change it, set FANTOM_BIND in .env, for example 0.0.0.0:8090. Only do this behind a firewall and HTTPS reverse proxy.
+The default bind is localhost-only (`127.0.0.1:8090`). To expose it, set `FANTOM_BIND=0.0.0.0:8090` only behind a firewall and HTTPS reverse proxy.
 
 ## Use the API
 
-Base URL: http://localhost:8090/v1
+Base URL: `http://localhost:8090/v1`
 
 ```bash
 curl http://localhost:8090/v1/chat/completions \
   -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
+  -H "X-Fantom-Token-Saver: safe" \
+  -H "X-Fantom-Code-Mode: full" \
   -d '{
     "model": "meta/your-model",
     "messages": [{"role": "user", "content": "Hello"}],
@@ -61,25 +70,40 @@ curl http://localhost:8090/v1/chat/completions \
   }'
 ```
 
-Health check is public:
+The model catalog and chat endpoint require `Authorization: Bearer YOUR_GATEWAY_KEY`. `/healthz` is public.
 
-```bash
-curl http://localhost:8090/healthz
-```
+## Token saver
 
-The model catalog and chat endpoint require Authorization: Bearer YOUR_GATEWAY_KEY.
+The default mode is configured by `FANTOM_TOKEN_SAVER=safe`. It only touches recognized command-tool results (`bash`, `shell`, `terminal`, `command`, or `exec`) and:
 
-## Configure providers
+- removes terminal ANSI control sequences;
+- keeps the final content of progress lines redrawn with carriage returns;
+- collapses consecutive identical non-empty lines;
+- minifies valid JSON without changing its data.
 
-Edit configs/providers.json. Provider secrets must remain in environment variables, not in this JSON file.
+User prompts, assistant messages, and file-read tool results are left untouched. The optimizer does not discard large arbitrary blocks or replace file contents with unrecoverable placeholders.
 
-Example NVIDIA provider:
+Per request, override the default:
+
+- `X-Fantom-Token-Saver: safe` — normalization and repeated-line cleanup.
+- `X-Fantom-Token-Saver: off` — pass the request body through unchanged.
+- `X-Fantom-Code-Mode: lite|full|ultra` — prepend a compact coding instruction that prioritizes minimal, complete changes. Default: off.
+
+Responses report `X-Fantom-Tool-Results-Optimized`, `X-Fantom-Bytes-Saved` and `X-Fantom-Estimated-Tokens-Saved` when a command result was shortened. The estimate is bytes divided by four, not a provider tokenizer measurement.
+
+RTK's own `rtk-proxy` is licensed BUSL-1.1 and its terms restrict offering the daemon or a derivative as a paid or hosted third-party service. Fantom therefore implements its own limited normalization logic rather than bundling or copying that daemon. Ponytail's ideas are represented by a small, opt-in code-mode directive rather than injecting its full skill into every request.
+
+## Provider configuration
+
+Edit `configs/providers.json`; keep API keys in environment variables, not JSON.
+
+NVIDIA uses:
 
 ```json
 {
   "id": "nvidia",
   "base_url": "https://integrate.api.nvidia.com/v1",
-  "auth_type": "bearer",
+  "chat_path": "/chat/completions",
   "api_key_env": "NVIDIA_API_KEY",
   "api_keys_env": "NVIDIA_API_KEYS",
   "models": ["*"],
@@ -87,15 +111,31 @@ Example NVIDIA provider:
 }
 ```
 
-- base_url: OpenAI-compatible API base URL, without the final /chat/completions or /models path.
-- auth_type: bearer or none.
-- api_key_env: environment variable holding one upstream key.
-- api_keys_env: environment variable holding comma-separated upstream keys. When both are set, api_keys_env takes precedence when non-empty.
-- models: exact upstream model IDs or *.
-- timeout_seconds: time allowed to receive upstream response headers; defaults to 100, valid maximum 600.
-- headers: optional provider-specific headers.
+OpenCode Console uses separate URLs for chat and model discovery:
 
-Example public alias:
+```json
+{
+  "id": "opencode-console",
+  "base_url": "https://opencode.ai/inference/openai/v1",
+  "chat_path": "/chat/completions",
+  "models_url": "https://opencode.ai/inference/v1/models",
+  "api_key_env": "OPENCODE_API_KEY",
+  "models": ["kimi-k3"],
+  "timeout_seconds": 100
+}
+```
+
+- `base_url`: upstream API base URL.
+- `chat_path`: chat-completions path, defaults to `/chat/completions`.
+- `models_url`: optional absolute URL for model discovery; if omitted, Fantom requests `base_url + /models`.
+- `auth_type`: `bearer` or `none`.
+- `api_key_env`: environment variable for one key.
+- `api_keys_env`: comma-separated key pool; takes precedence when non-empty.
+- `models`: exact model IDs or `*`.
+- `timeout_seconds`: response-header timeout, default 100 and maximum 600.
+- `headers`: optional provider-specific headers.
+
+Public aliases can route a client-facing model name to a provider/model pair:
 
 ```json
 {
@@ -108,9 +148,7 @@ Example public alias:
 }
 ```
 
-A route maps public model ID fast-model to the upstream model. The upstream model must be included in that provider's model allowlist (or the provider must use *).
-
-After changing provider configuration, restart the container:
+After editing provider configuration, restart:
 
 ```bash
 docker compose restart fantom
@@ -118,32 +156,22 @@ docker compose restart fantom
 
 ## Outbound proxy
 
-Fantom uses Go's pooled net/http transport with http.ProxyFromEnvironment. Set HTTPS_PROXY (and optionally HTTP_PROXY / NO_PROXY) in .env when upstream providers must be reached through an outbound proxy. This is separate from Fantom's own public API endpoint.
+Fantom uses Go's pooled `net/http` transport with `http.ProxyFromEnvironment`. Set `HTTPS_PROXY` (and optionally `HTTP_PROXY` / `NO_PROXY`) in `.env` for outbound provider traffic. This is separate from Fantom's own public API endpoint.
 
 ## Publish to Docker Hub
 
-The GitHub Actions workflow builds linux/amd64 and linux/arm64 and publishes:
+GitHub Actions builds `linux/amd64` and `linux/arm64` and publishes:
 
-- monsmain/fantom:latest for pushes to main.
-- monsmain/fantom:vX.Y.Z for Git tags such as v0.1.0.
-- monsmain/fantom:sha-<commit> for traceable builds.
+- `monsmain/fantom:latest` on pushes to `main`.
+- `monsmain/fantom:vX.Y.Z` for version tags.
+- `monsmain/fantom:sha-<commit>` for traceable builds.
 
-Add these GitHub Actions repository secrets in Settings → Secrets and variables → Actions:
+Configure these GitHub Actions repository secrets:
 
-- DOCKER_USERNAME or DOCKERHUB_USERNAME: Docker Hub username.
-- DOCKERHUB_TOKEN: Docker Hub access token with permission to push to monsmain/fantom.
-
-Pull the published image:
-
-```bash
-docker pull monsmain/fantom:latest
-```
-
-For configuration and persistence, use the included compose.yaml rather than running the bare image.
+- `DOCKER_USERNAME` or `DOCKERHUB_USERNAME`: Docker Hub username.
+- `DOCKERHUB_TOKEN`: token with push permission to `monsmain/fantom`.
 
 ## Local development
-
-Gateway:
 
 ```bash
 go test ./...
@@ -151,7 +179,7 @@ go vet ./...
 GATEWAY_API_KEY=dev-secret NVIDIA_API_KEY=your-key go run ./cmd/gateway
 ```
 
-Dashboard:
+For the dashboard:
 
 ```bash
 cd dashboard
@@ -159,12 +187,9 @@ npm install
 npm run dev
 ```
 
-The supported Docker deployment exports the dashboard to static assets and serves both UI and API on the same port.
+## Security
 
-## Security notes
-
-- Replace the sample client key before starting the service.
-- Do not commit .env or provider API keys.
+- Replace the sample gateway key before starting.
+- Do not commit `.env` or provider API keys.
 - Keep the default localhost-only bind unless public exposure is intentional.
-- Put a TLS reverse proxy and firewall in front of any public deployment.
-- The dashboard does not store the API key entered to load models; it is held in browser memory only.
+- Put TLS termination and a firewall in front of public deployments.

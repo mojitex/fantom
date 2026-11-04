@@ -5,11 +5,22 @@
     {
       "id": "nvidia",
       "base_url": "https://integrate.api.nvidia.com/v1",
+      "chat_path": "/chat/completions",
       "auth_type": "bearer",
       "api_key_env": "NVIDIA_API_KEY",
       "api_keys_env": "NVIDIA_API_KEYS",
       "models": ["*"],
-      "timeout_seconds": 100,
+      "timeout_seconds": 100
+    },
+    {
+      "id": "opencode-console",
+      "base_url": "https://opencode.ai/inference/openai/v1",
+      "chat_path": "/chat/completions",
+      "models_url": "https://opencode.ai/inference/v1/models",
+      "auth_type": "bearer",
+      "api_key_env": "OPENCODE_API_KEY",
+      "models": ["kimi-k3"],
+      "timeout_seconds": 100
     }
   ],
   "routes": {}
