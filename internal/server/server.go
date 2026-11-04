@@ -86,6 +86,7 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 			id = fmt.Sprintf("%x-%x", time.Now().UnixNano(), s.requestID.Add(1))
 		}
 		w.Header().Set("X-Request-ID", id)
+		r.Header.Set("X-Request-ID", id)
 		next.ServeHTTP(w, r)
 	})
 }
