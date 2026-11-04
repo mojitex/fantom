@@ -68,7 +68,7 @@ func Load() (*Config, error) {
 	cfg.StaticDirectory = envOr("STATIC_DIR", "./dashboard/out")
 	cfg.MaxRequestBytes = int64(ParsePositiveIntEnv("MAX_REQUEST_MB", 32)) << 20
 	cfg.DefaultTokenSaver = strings.ToLower(envOr("FANTOM_TOKEN_SAVER", "safe"))
-	if cfg.DefaultTokenSaver != "safe" && cfg.DefaultTokenSaver != "balanced" {
+	if cfg.DefaultTokenSaver != "safe" {
 		cfg.DefaultTokenSaver = "off"
 	}
 	cfg.DefaultCodeMode = strings.ToLower(envOr("FANTOM_CODE_MODE", "off"))
