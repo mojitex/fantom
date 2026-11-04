@@ -50,3 +50,62 @@ func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
 	if response.Code != http.StatusOK { t.Fatalf("chat status = %d, body=%s", response.Code, response.Body.String()) }
 	if !strings.Contains(response.Body.String(), "chat-test") { t.Fatalf("unexpected response body: %s", response.Body.String()) }
 }
+
+func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer oc_sk_test" {
+			t.Errorf("OpenCode Console API key not forwarded")
+		}
+		switch r.URL.Path {
+		case "/inference/v1/models":
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"kimi-k3"},{"id":"some-free-model"}]}`)
+		case "/inference/openai/v1/chat/completions":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { t.Errorf("decode request: %v", err) }
+			messages := payload["messages"].([]any)
+			if messages[0].(map[string]any)["role"] != "system" {
+				t.Errorf("requested code mode was not injected: %#v", messages[0])
+			}
+			_, _ = io.WriteString(w, `{"id":"opencode-chat","choices":[]}`)
+		default:
+			t.Errorf("unexpected OpenCode Console path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "opencode-console",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		Providers: []config.Provider{{
+			ID: "opencode-console",
+			BaseURL: upstream.URL + "/inference/openai/v1",
+			ChatPath: "/chat/completions",
+			ModelsURL: upstream.URL + "/inference/v1/models",
+			AuthType: "bearer",
+			APIKeys: []string{"oc_sk_test"},
+			Models: []string{"kimi-k3"},
+			TimeoutSeconds: 5,
+		}},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	modelRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	modelRequest.Header.Set("Authorization", "Bearer gateway-secret")
+	modelResponse := httptest.NewRecorder()
+	handler.ServeHTTP(modelResponse, modelRequest)
+	if modelResponse.Code != http.StatusOK { t.Fatalf("models status = %d, body=%s", modelResponse.Code, modelResponse.Body.String()) }
+	if !strings.Contains(modelResponse.Body.String(), "kimi-k3") || strings.Contains(modelResponse.Body.String(), "some-free-model") {
+		t.Fatalf("model allowlist was not enforced: %s", modelResponse.Body.String())
+	}
+
+	chatRequest := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"kimi-k3","messages":[{"role":"user","content":"Fix this code"}]}`))
+	chatRequest.Header.Set("Authorization", "Bearer gateway-secret")
+	chatRequest.Header.Set("X-Fantom-Token-Saver", "off")
+	chatRequest.Header.Set("X-Fantom-Code-Mode", "full")
+	chatResponse := httptest.NewRecorder()
+	handler.ServeHTTP(chatResponse, chatRequest)
+	if chatResponse.Code != http.StatusOK { t.Fatalf("chat status = %d, body=%s", chatResponse.Code, chatResponse.Body.String()) }
+	if !strings.Contains(chatResponse.Body.String(), "opencode-chat") { t.Fatalf("unexpected response: %s", chatResponse.Body.String()) }
+}
