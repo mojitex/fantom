@@ -130,7 +130,7 @@ The GitHub Actions workflow builds linux/amd64 and linux/arm64 and publishes:
 
 Add these GitHub Actions repository secrets in Settings → Secrets and variables → Actions:
 
-- DOCKERHUB_USERNAME: Docker Hub username.
+- DOCKER_USERNAME or DOCKERHUB_USERNAME: Docker Hub username.
 - DOCKERHUB_TOKEN: Docker Hub access token with permission to push to monsmain/fantom.
 
 Pull the published image:
