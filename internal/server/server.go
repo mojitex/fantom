@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mojitex/fantom/internal/config"
+	"github.com/mojitex/fantom/internal/optimizer"
 	"github.com/mojitex/fantom/internal/routing"
 )
 
@@ -148,7 +149,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, runtime.config.BaseURL+"/models", nil)
+		modelsURL := runtime.config.ModelsURL
+		if modelsURL == "" {
+			modelsURL = runtime.config.BaseURL + "/models"
+		}
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, modelsURL, nil)
 		if err != nil { continue }
 		s.applyProviderHeaders(req, runtime, runtime.apiKey())
 		resp, err := runtime.client.Do(req)
@@ -227,7 +232,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, provider.config.BaseURL+"/chat/completions", bytes.NewReader(body))
+	saverMode := r.Header.Get("X-Fantom-Token-Saver")
+	if strings.TrimSpace(saverMode) == "" {
+		saverMode = s.config.DefaultTokenSaver
+	}
+	codeMode := r.Header.Get("X-Fantom-Code-Mode")
+	if strings.TrimSpace(codeMode) == "" {
+		codeMode = s.config.DefaultCodeMode
+	}
+	body, optimizationStats := optimizer.Apply(body, saverMode, codeMode)
+	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe", "balanced"))
+	if optimizationStats.ToolResultsChanged > 0 {
+		w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
+		w.Header().Set("X-Fantom-Bytes-Saved", fmt.Sprint(optimizationStats.SavedBytes()))
+		w.Header().Set("X-Fantom-Estimated-Tokens-Saved", fmt.Sprint(optimizationStats.SavedBytes()/4))
+	}
+	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, provider.config.BaseURL+provider.config.ChatPath, bytes.NewReader(body))
 	if err != nil {
 		writeAPIError(w, http.StatusBadGateway, "could not create upstream request", "provider_error")
 		return
@@ -253,6 +273,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if response.StatusCode >= 500 {
 		s.logger.Warn("upstream provider returned server error", "provider", provider.config.ID, "model", input.Model, "status", response.StatusCode)
 	}
+}
+
+func normalizedMode(value string, allowed ...string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return "off"
 }
 
 func (s *Server) applyProviderHeaders(req *http.Request, provider *providerRuntime, key string) {
