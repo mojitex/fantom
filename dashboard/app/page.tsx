@@ -65,7 +65,7 @@ export default function Home() {
       <section className="status-panel">
         <div className="section-heading">
           <div><span className="section-kicker">01 / SYSTEM</span><h2>Gateway status</h2></div>
-          <span className={health ? "status-pill online" : "status-pill offline"}><span /> {health ? "OPERATIONAL" : healthError ? "UNAVAILABLE" : "CHECKING"}</span>
+          <span className={health ? "status-pill online" : healthError ? "status-pill offline" : "status-pill checking"}><span /> {health ? "OPERATIONAL" : healthError ? "UNAVAILABLE" : "CHECKING"}</span>
         </div>
         <div className="status-grid">
           <div className="status-cell"><span className="cell-label">SERVICE</span><strong>{health?.service || "Fantom AI Gateway"}</strong></div>
