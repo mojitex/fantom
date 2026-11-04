@@ -14,12 +14,12 @@
     },
     {
       "id": "opencode-console",
-      "base_url": "https://opencode.ai/inference/openai/v1",
-      "chat_path": "/chat/completions",
+      "base_url": "https://opencode.ai/inference",
+      "chat_path": "/openai/v1/chat/completions",
       "models_url": "https://opencode.ai/inference/v1/models",
       "auth_type": "bearer",
       "api_key_env": "OPENCODE_API_KEY",
-      "models": ["kimi-k3"],
+      "models": ["kimi-k3", "glm-5.3", "glm-5.2", "minimax-m3", "deepseek-v4-pro", "deepseek-v4.1-flash", "kimi-k2.6"],
       "timeout_seconds": 100
     }
   ],
