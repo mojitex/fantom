@@ -27,9 +27,60 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  smoke:
+    name: Build and smoke-test container
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: monsmain/fantom:ci-test
+          cache-from: type=gha,scope=smoke
+          cache-to: type=gha,scope=smoke,mode=max
+      - name: Test container startup, health, auth and dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name fantom-smoke \
+            -p 127.0.0.1:18080:8080 \
+            -e GATEWAY_API_KEY=ci-only-test-key \
+            monsmain/fantom:ci-test
+          trap 'docker rm -f fantom-smoke >/dev/null 2>&1 || true' EXIT
+
+          for attempt in $(seq 1 40); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18080/healthz >/dev/null; then
+              break
+            fi
+            if [[ "$(docker inspect -f '{{.State.Running}}' fantom-smoke 2>/dev/null || true)" != "true" ]]; then
+              docker logs fantom-smoke || true
+              echo "Fantom container exited before becoming healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://127.0.0.1:18080/healthz | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:18080/ | grep -qi 'FANTOM'
+
+          code="$(curl -sS -o /tmp/fantom-unauthorized.json -w '%{http_code}' http://127.0.0.1:18080/v1/models)"
+          [[ "$code" == "401" ]]
+
+          curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
+            http://127.0.0.1:18080/v1/models | grep -q '"data"'
+          echo "Fantom container smoke test passed"
+
   docker:
     name: Build and publish Docker image
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -77,5 +128,5 @@ jobs:
           push: ${{ github.event_name != 'pull_request' && steps.dockerhub.outputs.configured == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=publish
+          cache-to: type=gha,scope=publish,mode=max
