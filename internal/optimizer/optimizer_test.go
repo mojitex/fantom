@@ -25,7 +25,7 @@ func TestApplyCompactsOnlyCommandToolResults(t *testing.T) {
 	messages := got["messages"].([]any)
 	if messages[0].(map[string]any)["content"] != "Keep my prompt exactly." { t.Fatal("user prompt was modified") }
 	firstTool := messages[2].(map[string]any)["content"].(string)
-	if strings.Contains(firstTool, "Progress 10%") || !strings.Contains(firstTool, "Done") || !strings.Contains(firstTool, "repeated 1 more times") {
+	if strings.Contains(firstTool, "Progress 10%") || !strings.Contains(firstTool, "Done") || !strings.Contains(firstTool, "[x2]") {
 		t.Fatalf("unexpected compacted shell output: %q", firstTool)
 	}
 	secondTool := messages[3].(map[string]any)["content"].(string)
