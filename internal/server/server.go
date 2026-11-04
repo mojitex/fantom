@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -236,6 +235,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	accept := strings.TrimSpace(r.Header.Get("Accept"))
 	if accept == "" { accept = "application/json" }
 	upstreamRequest.Header.Set("Accept", accept)
+	upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
 	s.applyProviderHeaders(upstreamRequest, provider, key)
 
 	response, err := provider.client.Do(upstreamRequest)
@@ -306,5 +306,3 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-// Ensure the dashboard file handler does not leak filesystem paths in default error bodies.
-var _ = httputil.DumpRequest
