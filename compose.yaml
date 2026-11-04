@@ -1,0 +1,36 @@
+name: fantom
+
+services:
+  fantom:
+    image: monsmain/fantom:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fantom
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GATEWAY_LISTEN_ADDR: ":8080"
+      CONFIG_FILE: /app/configs/providers.json
+      STATIC_DIR: /app/dashboard
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      NVIDIA_API_KEYS: ${NVIDIA_API_KEYS:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    ports:
+      - "${FANTOM_BIND:-127.0.0.1:8090}:8080"
+    volumes:
+      - ./configs:/app/configs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

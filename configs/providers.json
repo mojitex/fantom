@@ -1,0 +1,16 @@
+{
+  "listen_addr": ":8080",
+  "default_provider": "nvidia",
+  "providers": [
+    {
+      "id": "nvidia",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "auth_type": "bearer",
+      "api_key_env": "NVIDIA_API_KEY",
+      "api_keys_env": "NVIDIA_API_KEYS",
+      "models": ["*"],
+      "timeout_seconds": 100,
+    }
+  ],
+  "routes": {}
+}
