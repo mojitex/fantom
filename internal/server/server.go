@@ -58,6 +58,9 @@ func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	if logger == nil { logger = slog.Default() }
 	s := &Server{config: cfg, providers: make(map[string]*providerRuntime, len(cfg.Providers)), logger: logger}
 	for _, provider := range cfg.Providers {
+		if provider.ChatPath == "" {
+			provider.ChatPath = "/chat/completions"
+		}
 		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 		transport := &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -242,6 +245,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	body, optimizationStats := optimizer.Apply(body, saverMode, codeMode)
 	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe", "balanced"))
+	w.Header().Set("X-Fantom-Code-Mode", normalizedMode(codeMode, "lite", "full", "ultra"))
 	if optimizationStats.ToolResultsChanged > 0 {
 		w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
 		w.Header().Set("X-Fantom-Bytes-Saved", fmt.Sprint(optimizationStats.SavedBytes()))
