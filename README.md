@@ -85,7 +85,7 @@ User prompts, assistant messages, and file-read tool results are left untouched.
 
 Per request, override the default:
 
-- `X-Fantom-Token-Saver: safe` — normalization and repeated-line cleanup.
+- `X-Fantom-Token-Saver: safe` — normalization and repeated-line cleanup (default).
 - `X-Fantom-Token-Saver: off` — pass the request body through unchanged.
 - `X-Fantom-Code-Mode: lite|full|ultra` — prepend a compact coding instruction that prioritizes minimal, complete changes. Default: off.
 
