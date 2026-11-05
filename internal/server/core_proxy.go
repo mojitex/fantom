@@ -17,6 +17,7 @@ type CoreRouter interface {
 	ManagementProxy() http.Handler
 	Models(context.Context) ([]cliproxyengine.Model, error)
 	HasModel(context.Context, string) bool
+	ModelForProvider(string, string) string
 	SyncProviders([]config.Provider) error
 	Close()
 }
@@ -76,6 +77,9 @@ func (s *Server) syncCoreProviders() error {
 func (s *Server) handleCoreAPI(w http.ResponseWriter, r *http.Request) {
 	if s.core == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "embedded routing engine is not ready", "service_unavailable")
+		return
+	}
+	if s.serveProtocolCombo(w, r) {
 		return
 	}
 	s.core.APIProxy().ServeHTTP(w, r)

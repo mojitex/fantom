@@ -348,6 +348,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("embedded model catalog unavailable", "error", err)
 		} else {
 			for _, model := range coreModels {
+				// Fantom-managed provider aliases are private routing IDs. The
+				// public raw model IDs are already present in Fantom's own catalog.
+				if strings.HasPrefix(strings.ToLower(model.ID), "fantom-") {
+					continue
+				}
 				ownedBy := model.OwnedBy
 				if ownedBy == "" { ownedBy = "cli-proxy-api" }
 				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy})

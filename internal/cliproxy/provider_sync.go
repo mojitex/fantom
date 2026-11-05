@@ -1,6 +1,8 @@
 package cliproxy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +15,30 @@ import (
 )
 
 const managedProviderPrefix = "fantom-"
+
+func managedProviderPrefixForID(id string) string {
+	normalized := strings.ToLower(strings.TrimSpace(id))
+	var slug strings.Builder
+	lastDash := false
+	for _, r := range normalized {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			slug.WriteRune(r)
+			lastDash = false
+		default:
+			if slug.Len() > 0 && !lastDash {
+				slug.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	value := strings.Trim(slug.String(), "-")
+	if value == "" {
+		value = "provider"
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return managedProviderPrefix + value + "-" + hex.EncodeToString(sum[:3])
+}
 
 func compatibilityForProvider(provider fantomconfig.Provider) (sdkconfig.OpenAICompatibility, bool, error) {
 	provider.ID = strings.ToLower(strings.TrimSpace(provider.ID))
@@ -70,7 +96,7 @@ func compatibilityForProvider(provider fantomconfig.Provider) (sdkconfig.OpenAIC
 		headers = nil
 	}
 	compat := sdkconfig.OpenAICompatibility{
-		Name: managedProviderPrefix + provider.ID, BaseURL: baseURL,
+		Name: managedProviderPrefix + provider.ID, Prefix: managedProviderPrefixForID(provider.ID), BaseURL: baseURL,
 		Models: models, Headers: headers,
 	}
 	if provider.AuthType == "bearer" {
@@ -108,14 +134,23 @@ func (e *Engine) SyncProviders(providers []fantomconfig.Provider) error {
 		}
 	}
 	managed := make([]sdkconfig.OpenAICompatibility, 0, len(providers))
+	managedModels := make(map[string]map[string]string, len(providers))
 	for _, provider := range providers {
 		entry, include, err := compatibilityForProvider(provider)
 		if err != nil {
 			return err
 		}
-		if include {
-			managed = append(managed, entry)
+		if !include {
+			continue
 		}
+		managed = append(managed, entry)
+		models := make(map[string]string, len(entry.Models))
+		for _, model := range entry.Models {
+			if model.Name != "" {
+				models[model.Name] = entry.Prefix + "/" + model.Name
+			}
+		}
+		managedModels[provider.ID] = models
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	cfg.OpenAICompatibility = append(preserved, managed...)
@@ -125,5 +160,9 @@ func (e *Engine) SyncProviders(providers []fantomconfig.Provider) error {
 	if err := os.Chmod(e.configPath, 0o600); err != nil {
 		return fmt.Errorf("secure embedded provider registry: %w", err)
 	}
+	e.mu.Lock()
+	e.managedModels = managedModels
+	e.cachedAt = time.Time{}
+	e.mu.Unlock()
 	return nil
 }
