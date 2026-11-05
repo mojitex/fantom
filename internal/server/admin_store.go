@@ -58,6 +58,9 @@ type requestRecord struct {
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64     `json:"completion_tokens,omitempty"`
 	TotalTokens      int64     `json:"total_tokens,omitempty"`
+	UpstreamAttempts int       `json:"upstream_attempts,omitempty"`
+	CredentialRetries int      `json:"credential_retries,omitempty"`
+	FallbackAttempts int       `json:"fallback_attempts,omitempty"`
 }
 
 type adminState struct {

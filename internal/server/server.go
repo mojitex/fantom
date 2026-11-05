@@ -57,6 +57,7 @@ type Server struct {
 	providers   map[string]*providerRuntime
 	store       *adminStore
 	logger      *slog.Logger
+	handler     http.Handler
 	requestID   atomic.Uint64
 }
 
@@ -76,9 +77,9 @@ type modelRequest struct {
 	Model string `json:"model"`
 }
 
-func New(cfg *config.Config, logger *slog.Logger) http.Handler {
+func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if logger == nil { logger = slog.Default() }
-	store, err := newAdminStore(cfg)
+	store, err := newAdminStore(cfg, logger)
 	if err != nil {
 		logger.Error("could not initialize persistent admin state", "error", err)
 		store = &adminStore{path:"./data/fantom-state.json", data:adminState{Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode}}
@@ -92,7 +93,28 @@ func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
 	mux.HandleFunc("/", s.handleDashboard)
-	return s.withRequestID(mux)
+	s.handler = s.withRequestID(mux)
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+// Close releases idle upstream connections and flushes the request-history worker.
+// It is safe to call after HTTP server shutdown.
+func (s *Server) Close() {
+	s.providersMu.Lock()
+	providers := s.providers
+	s.providers = make(map[string]*providerRuntime)
+	s.providersMu.Unlock()
+
+	for _, provider := range providers {
+		provider.client.CloseIdleConnections()
+	}
+	if s.store != nil {
+		s.store.Close()
+	}
 }
 
 func newProviderRuntime(provider config.Provider) *providerRuntime {
@@ -107,7 +129,16 @@ func (s *Server) reloadProviderRuntime() {
 	state:=s.store.snapshot()
 	next:=make(map[string]*providerRuntime,len(state.Providers))
 	for _,saved:=range state.Providers { p:=saved.runtime(); next[p.ID]=newProviderRuntime(p) }
-	s.providersMu.Lock(); s.providers=next; s.providersMu.Unlock()
+	s.providersMu.Lock()
+	old := s.providers
+	s.providers = next
+	s.providersMu.Unlock()
+
+	// Provider edits replace transports. Close only idle connections; active
+	// in-flight requests continue using their existing transport.
+	for _, provider := range old {
+		provider.client.CloseIdleConnections()
+	}
 }
 func (s *Server) providerByID(id string) *providerRuntime {
 	s.providersMu.RLock(); defer s.providersMu.RUnlock()
@@ -331,10 +362,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	var selectedProvider *providerRuntime
 	attempts:=0
+	modelFallbacks:=0
+	credentialRetries:=0
 	for candidateIndex,candidateModel:=range candidates {
 		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
 		if resolveErr!=nil { lastErr=resolveErr; continue }
 		provider:=s.providerByID(target.ProviderID)
+		if candidateIndex > 0 { modelFallbacks++ }
 		record.Provider=target.ProviderID
 		if provider==nil { lastErr=fmt.Errorf("provider %q is not available",target.ProviderID); continue }
 		attemptPayload:=make(map[string]json.RawMessage,len(payload))
@@ -379,6 +413,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if shouldRetryCredential(response.StatusCode)&&keyIndex<len(keyAttempts)-1 {
 				lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
+				credentialRetries++
 				_ = response.Body.Close()
 				response=nil
 				continue
@@ -397,6 +432,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		record.Provider=provider.config.ID
 		break
 	}
+	if attempts > 0 {
+		w.Header().Set("X-Fantom-Upstream-Attempts", fmt.Sprint(attempts))
+	}
+	if modelFallbacks > 0 {
+		w.Header().Set("X-Fantom-Fallback-Attempts", fmt.Sprint(modelFallbacks))
+	}
+	if credentialRetries > 0 {
+		w.Header().Set("X-Fantom-Credential-Retries", fmt.Sprint(credentialRetries))
+	}
+	record.UpstreamAttempts = attempts
+	record.CredentialRetries = credentialRetries
+	record.FallbackAttempts = modelFallbacks
+
 	if response==nil {
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
@@ -408,7 +456,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if selectedProvider!=nil {
 		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
 	}
-	if attempts>1 { w.Header().Set("X-Fantom-Fallback-Attempts",fmt.Sprint(attempts-1)) }
 	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
 	s.streamBodyWithUsage(w,response.Body,&record,response.Header.Get("Content-Type"))
@@ -528,11 +575,19 @@ func captureProviderUsage(body []byte, contentType string, record *requestRecord
 
 func copyResponseHeaders(dst, src http.Header) {
 	for name, values := range src {
-		switch strings.ToLower(name) {
+		lowerName := strings.ToLower(name)
+		// These headers belong to the gateway. Never let an upstream inject
+		// duplicate or misleading routing, retry, or request-correlation data.
+		if lowerName == "x-request-id" || strings.HasPrefix(lowerName, "x-fantom-") {
+			continue
+		}
+		switch lowerName {
 		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length":
 			continue
 		}
-		for _, value := range values { dst.Add(name, value) }
+		for _, value := range values {
+			dst.Add(name, value)
+		}
 	}
 }
 

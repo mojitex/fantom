@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"sync/atomic"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,7 @@ func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
 		}},
 	}
 	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
 
 	health := httptest.NewRecorder()
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -95,6 +97,7 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 		}},
 	}
 	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
 
 	modelRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	modelRequest.Header.Set("Authorization", "Bearer gateway-secret")
@@ -132,6 +135,7 @@ func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
 		Routes: map[string]config.Route{},
 	}
 	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
 
 	call := func(method, path, body, key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -206,6 +210,7 @@ func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
 		},
 	}
 	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	t.Cleanup(handler.Close)
 	req:=httptest.NewRequest(http.MethodPost,"/v1/chat/completions",strings.NewReader(`{"model":"frontdoor","messages":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("Authorization","Bearer gateway-secret")
 	res:=httptest.NewRecorder()
@@ -244,6 +249,9 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 		auth:=r.Header.Get("Authorization")
 		seen=append(seen,auth)
 		if auth=="Bearer revoked-key" { w.WriteHeader(http.StatusUnauthorized); _,_=io.WriteString(w,`{"error":{"message":"revoked"}}`); return }
+		w.Header().Set("X-Fantom-Upstream-Attempts", "999")
+		w.Header().Set("X-Fantom-Selected-Provider", "spoofed-provider")
+		w.Header().Set("X-Request-ID", "spoofed-request")
 		_,_=io.WriteString(w,`{"id":"key-failover-ok","choices":[]}`)
 	}))
 	defer upstream.Close()
@@ -252,6 +260,7 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"revoked-key","healthy-key"},Models:[]string{"test-model"},TimeoutSeconds:5}},
 	}
 	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	t.Cleanup(handler.Close)
 	req:=httptest.NewRequest(http.MethodPost,"/v1/chat/completions",strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("Authorization","Bearer gateway-secret")
 	res:=httptest.NewRecorder()
@@ -260,8 +269,41 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 	if len(seen)!=2 || seen[0]!="Bearer revoked-key" || seen[1]!="Bearer healthy-key" {
 		t.Fatalf("credential retry order = %#v",seen)
 	}
-	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" {
-		t.Fatalf("credential retry attempts header = %q",res.Header().Get("X-Fantom-Fallback-Attempts"))
+	if res.Header().Get("X-Fantom-Upstream-Attempts") != "2" {
+		t.Fatalf("upstream attempts header = %q", res.Header().Get("X-Fantom-Upstream-Attempts"))
+	}
+	if res.Header().Get("X-Fantom-Credential-Retries") != "1" {
+		t.Fatalf("credential retry header = %q", res.Header().Get("X-Fantom-Credential-Retries"))
+	}
+	if got := res.Header().Get("X-Fantom-Fallback-Attempts"); got != "" {
+		t.Fatalf("credential retries must not be reported as model fallbacks: %q", got)
+	}
+	if values := res.Header().Values("X-Fantom-Upstream-Attempts"); len(values) != 1 || values[0] != "2" {
+		t.Fatalf("upstream must not spoof gateway attempt header: %#v", values)
+	}
+	if got := res.Header().Get("X-Fantom-Selected-Provider"); got != "primary" {
+		t.Fatalf("upstream must not spoof selected provider: %q", got)
+	}
+	if got := res.Header().Get("X-Request-ID"); strings.Contains(got, "spoofed") {
+		t.Fatalf("upstream must not spoof request ID: %q", got)
+	}
+
+	logReq := httptest.NewRequest(http.MethodGet, "/api/admin/logs?limit=1", nil)
+	logReq.Header.Set("Authorization", "Bearer gateway-secret")
+	logResponse := httptest.NewRecorder()
+	handler.ServeHTTP(logResponse, logReq)
+	var history struct {
+		Requests []requestRecord `json:"requests"`
+	}
+	if err := json.Unmarshal(logResponse.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Requests) != 1 {
+		t.Fatalf("request history length = %d, want 1", len(history.Requests))
+	}
+	row := history.Requests[0]
+	if row.UpstreamAttempts != 2 || row.CredentialRetries != 1 || row.FallbackAttempts != 0 {
+		t.Fatalf("incorrect retry diagnostics persisted: %+v", row)
 	}
 }
 
@@ -296,6 +338,7 @@ func TestProviderTestRequiresChatCompletionNotJustModelsEndpoint(t *testing.T) {
 		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"none",Models:[]string{"*"},TimeoutSeconds:5}},
 	}
 	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	t.Cleanup(handler.Close)
 	req:=httptest.NewRequest(http.MethodPost,"/api/admin/providers/primary/test",strings.NewReader("{}"))
 	req.Header.Set("Authorization","Bearer admin-secret")
 	res:=httptest.NewRecorder()
@@ -321,6 +364,7 @@ func TestModelCatalogIsCachedAndCanBeInvalidated(t *testing.T) {
 		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"none",Models:[]string{"*"},TimeoutSeconds:5}},
 	}
 	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	t.Cleanup(handler.Close)
 	call:=func(method,path string)*httptest.ResponseRecorder{
 		req:=httptest.NewRequest(method,path,nil)
 		req.Header.Set("Authorization","Bearer admin-secret")
