@@ -343,6 +343,7 @@ func (s *Server) providerModels(ctx context.Context, provider *providerRuntime) 
 			break
 		}
 		if shouldRetryCredential(resp.StatusCode) {
+			provider.cooldownCredential(key, resp.StatusCode, resp.Header.Get("Retry-After"))
 			_ = resp.Body.Close()
 			continue
 		}
