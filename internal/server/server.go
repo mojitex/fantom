@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,11 +24,13 @@ import (
 )
 
 type providerRuntime struct {
-	config          config.Provider
-	client          *http.Client
-	nextKey         atomic.Uint64
-	catalogMu       sync.Mutex
-	catalogModels   []string
+	config           config.Provider
+	client           *http.Client
+	nextKey          atomic.Uint64
+	keyMu            sync.Mutex
+	keyCooldowns     []time.Time
+	catalogMu        sync.Mutex
+	catalogModels    []string
 	catalogFetchedAt time.Time
 }
 
@@ -42,13 +45,84 @@ func (p *providerRuntime) apiKey() string {
 // permanently pinning a provider to a revoked or rate-limited key.
 func (p *providerRuntime) apiKeysForRequest() []string {
 	keys := p.config.APIKeys
-	if len(keys) == 0 { return []string{""} }
-	start := int((p.nextKey.Add(1) - 1) % uint64(len(keys)))
-	ordered := make([]string, 0, len(keys))
-	for i := 0; i < len(keys); i++ {
-		ordered = append(ordered, keys[(start+i)%len(keys)])
+	if len(keys) == 0 {
+		return []string{""}
 	}
-	return ordered
+	start := int((p.nextKey.Add(1) - 1) % uint64(len(keys)))
+	now := time.Now()
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+
+	ordered := make([]string, 0, len(keys))
+	earliestIndex := start
+	var earliest time.Time
+	for offset := 0; offset < len(keys); offset++ {
+		index := (start + offset) % len(keys)
+		if index >= len(p.keyCooldowns) {
+			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
+		}
+		until := p.keyCooldowns[index]
+		if until.IsZero() || !now.Before(until) {
+			p.keyCooldowns[index] = time.Time{}
+			ordered = append(ordered, keys[index])
+			continue
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+			earliestIndex = index
+		}
+	}
+	if len(ordered) > 0 {
+		return ordered
+	}
+	// If every credential is cooling down, probe only the one whose cooldown
+	// expires first instead of hammering every known-throttled credential.
+	return []string{keys[earliestIndex]}
+}
+
+func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter string) {
+	duration := credentialCooldown(status, retryAfter, time.Now())
+	if duration <= 0 || key == "" {
+		return
+	}
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	for index, configured := range p.config.APIKeys {
+		if configured != key {
+			continue
+		}
+		if index >= len(p.keyCooldowns) {
+			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
+		}
+		until := time.Now().Add(duration)
+		if until.After(p.keyCooldowns[index]) {
+			p.keyCooldowns[index] = until
+		}
+		return
+	}
+}
+
+func credentialCooldown(status int, retryAfter string, now time.Time) time.Duration {
+	const maxCooldown = time.Hour
+	switch status {
+	case http.StatusTooManyRequests:
+		value := strings.TrimSpace(retryAfter)
+		if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+			if seconds >= int(maxCooldown/time.Second) { return maxCooldown }
+			return time.Duration(seconds) * time.Second
+		}
+		if parsed, err := http.ParseTime(value); err == nil {
+			duration := parsed.Sub(now)
+			if duration > maxCooldown { return maxCooldown }
+			if duration < 0 { return 0 }
+			return duration
+		}
+		return 30 * time.Second
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired:
+		return 2 * time.Minute
+	default:
+		return 0
+	}
 }
 
 type Server struct {
@@ -411,12 +485,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				response=nil
 				break
 			}
-			if shouldRetryCredential(response.StatusCode)&&keyIndex<len(keyAttempts)-1 {
-				lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
-				credentialRetries++
-				_ = response.Body.Close()
-				response=nil
-				continue
+			if shouldRetryCredential(response.StatusCode) {
+				provider.cooldownCredential(key, response.StatusCode, response.Header.Get("Retry-After"))
+				if keyIndex<len(keyAttempts)-1 {
+					lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
+					credentialRetries++
+					_ = response.Body.Close()
+					response=nil
+					continue
+				}
 			}
 			break
 		}
