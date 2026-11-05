@@ -305,3 +305,34 @@ func TestProviderTestRequiresChatCompletionNotJustModelsEndpoint(t *testing.T) {
 		t.Fatalf("provider smoke test did not verify chat completion: %s",res.Body.String())
 	}
 }
+
+
+func TestModelCatalogIsCachedAndCanBeInvalidated(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR",t.TempDir())
+	var catalogCalls atomic.Int32
+	upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+		if r.URL.Path!="/v1/models" { http.NotFound(w,r); return }
+		catalogCalls.Add(1)
+		_,_=io.WriteString(w,`{"data":[{"id":"cached-model"}]}`)
+	}))
+	defer upstream.Close()
+	cfg:=&config.Config{
+		DefaultProvider:"primary",GatewayAPIKeys:[]string{"admin-secret"},MaxRequestBytes:1<<20,
+		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"none",Models:[]string{"*"},TimeoutSeconds:5}},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	call:=func(method,path string)*httptest.ResponseRecorder{
+		req:=httptest.NewRequest(method,path,nil)
+		req.Header.Set("Authorization","Bearer admin-secret")
+		res:=httptest.NewRecorder(); handler.ServeHTTP(res,req); return res
+	}
+	for i:=0;i<2;i++ {
+		res:=call(http.MethodGet,"/v1/models")
+		if res.Code!=http.StatusOK || !strings.Contains(res.Body.String(),"cached-model") { t.Fatalf("model list %d = %d: %s",i,res.Code,res.Body.String()) }
+	}
+	if got:=catalogCalls.Load();got!=1 { t.Fatalf("catalog endpoint called %d times before expiry, want 1",got) }
+	refresh:=call(http.MethodPost,"/api/admin/models/refresh")
+	if refresh.Code!=http.StatusOK { t.Fatalf("catalog refresh = %d: %s",refresh.Code,refresh.Body.String()) }
+	_ = call(http.MethodGet,"/v1/models")
+	if got:=catalogCalls.Load();got!=2 { t.Fatalf("catalog endpoint called %d times after refresh, want 2",got) }
+}

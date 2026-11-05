@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -22,9 +23,12 @@ import (
 )
 
 type providerRuntime struct {
-	config  config.Provider
-	client  *http.Client
-	nextKey atomic.Uint64
+	config          config.Provider
+	client          *http.Client
+	nextKey         atomic.Uint64
+	catalogMu       sync.Mutex
+	catalogModels   []string
+	catalogFetchedAt time.Time
 }
 
 func (p *providerRuntime) apiKey() string {
@@ -192,25 +196,81 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _,saved:=range state.Providers {
 		runtime:=s.providerByID(saved.ID)
 		if runtime==nil { continue }
-		if runtime.config.AuthType=="bearer" && len(runtime.config.APIKeys)==0 {
-			for _,model:=range runtime.config.Models { if model!="*" { appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID}) } }
-			continue
+		for _,model:=range s.providerModels(r.Context(),runtime) {
+			appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID})
 		}
-		modelsURL:=runtime.config.ModelsURL
-		if modelsURL=="" { modelsURL=runtime.config.BaseURL+"/models" }
-		req,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,modelsURL,nil)
-		if err!=nil { continue }
-		s.applyProviderHeaders(req,runtime,runtime.apiKey())
-		resp,err:=runtime.client.Do(req)
-		if err!=nil { s.logger.Warn("provider model catalog request failed","provider",runtime.config.ID,"error",err); continue }
-		var remote upstreamModelList
-		decodeErr:=json.NewDecoder(io.LimitReader(resp.Body,8<<20)).Decode(&remote)
-		_ = resp.Body.Close()
-		if resp.StatusCode<200||resp.StatusCode>=300||decodeErr!=nil { s.logger.Warn("provider model catalog returned an error","provider",runtime.config.ID,"status",resp.StatusCode,"decode_error",decodeErr); continue }
-		for _,model:=range remote.Data { if model.ID!=""&&modelAllowed(runtime.config.Models,model.ID) { appendModel(&items,seen,modelItem{ID:model.ID,Object:"model",OwnedBy:runtime.config.ID}) } }
 	}
 	for alias,route:=range state.Routes { if s.providerByID(route.Provider)!=nil { appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider}) } }
 	writeJSON(w,http.StatusOK,map[string]any{"object":"list","data":items})
+}
+
+
+func (s *Server) providerModels(ctx context.Context, provider *providerRuntime) []string {
+	provider.catalogMu.Lock()
+	defer provider.catalogMu.Unlock()
+
+	const catalogTTL = 45 * time.Second
+	if len(provider.catalogModels)>0 && time.Since(provider.catalogFetchedAt)<catalogTTL {
+		return append([]string(nil),provider.catalogModels...)
+	}
+
+	// Keep a usable, explicit allowlist available even when a provider's
+	// /models endpoint is unavailable or does not support catalog discovery.
+	fallback:=make([]string,0,len(provider.config.Models))
+	for _,model:=range provider.config.Models {
+		model=strings.TrimSpace(model)
+		if model!="" && model!="*" { fallback=append(fallback,model) }
+	}
+	if provider.config.AuthType=="bearer" && len(provider.config.APIKeys)==0 {
+		return fallback
+	}
+
+	modelsURL:=provider.config.ModelsURL
+	if modelsURL=="" { modelsURL=provider.config.BaseURL+"/models" }
+	for _,key:=range provider.apiKeysForRequest() {
+		if provider.config.AuthType=="bearer" && key=="" { break }
+		req,err:=http.NewRequestWithContext(ctx,http.MethodGet,modelsURL,nil)
+		if err!=nil { break }
+		s.applyProviderHeaders(req,provider,key)
+		resp,err:=provider.client.Do(req)
+		if err!=nil {
+			s.logger.Warn("provider model catalog request failed","provider",provider.config.ID,"error",err)
+			break
+		}
+		if shouldRetryCredential(resp.StatusCode) {
+			_ = resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode<200 || resp.StatusCode>=300 {
+			s.logger.Warn("provider model catalog returned an error","provider",provider.config.ID,"status",resp.StatusCode)
+			_ = resp.Body.Close()
+			break
+		}
+		var remote upstreamModelList
+		decodeErr:=json.NewDecoder(io.LimitReader(resp.Body,8<<20)).Decode(&remote)
+		_ = resp.Body.Close()
+		if decodeErr!=nil {
+			s.logger.Warn("provider model catalog returned invalid JSON","provider",provider.config.ID,"error",decodeErr)
+			break
+		}
+		result:=make([]string,0,len(remote.Data))
+		seen:=make(map[string]bool,len(remote.Data))
+		for _,model:=range remote.Data {
+			if model.ID!="" && modelAllowed(provider.config.Models,model.ID) && !seen[model.ID] {
+				seen[model.ID]=true
+				result=append(result,model.ID)
+			}
+		}
+		provider.catalogModels=result
+		provider.catalogFetchedAt=time.Now()
+		return append([]string(nil),result...)
+	}
+
+	// Serve the last known-good catalog when a transient provider failure occurs.
+	if len(provider.catalogModels)>0 {
+		return append([]string(nil),provider.catalogModels...)
+	}
+	return fallback
 }
 
 func appendModel(items *[]modelItem, seen map[string]struct{}, item modelItem) {
@@ -315,7 +375,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr=requestErr
 				s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
 				response=nil
-				if keyIndex<len(keyAttempts)-1 { continue }
 				break
 			}
 			if shouldRetryCredential(response.StatusCode)&&keyIndex<len(keyAttempts)-1 {
@@ -360,8 +419,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func shouldRetryCredential(status int) bool {
+	// These responses are commonly scoped to an individual credential.
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusTooManyRequests:
 		return true
 	default:
 		return false
@@ -369,7 +429,12 @@ func shouldRetryCredential(status int) bool {
 }
 
 func shouldFallback(status int) bool {
-	return shouldRetryCredential(status)
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizedMode(value string, allowed ...string) string {

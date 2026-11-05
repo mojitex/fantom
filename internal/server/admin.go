@@ -15,6 +15,19 @@ import (
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	parts:=strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path,"/api/admin/"),"/"),"/")
+
+	if len(parts)==2 && parts[0]=="models" && parts[1]=="refresh" {
+		if r.Method!=http.MethodPost { methodNotAllowed(w); return }
+		for _,saved:=range s.store.snapshot().Providers {
+			if runtime:=s.providerByID(saved.ID); runtime!=nil {
+				runtime.catalogMu.Lock()
+				runtime.catalogFetchedAt=time.Time{}
+				runtime.catalogMu.Unlock()
+			}
+		}
+		writeJSON(w,http.StatusOK,map[string]any{"ok":true,"message":"Provider model catalogs invalidated"})
+		return
+	}
 	if len(parts)==1 && parts[0]=="providers" {
 		switch r.Method {
 		case http.MethodGet: s.listProviders(w,r)
