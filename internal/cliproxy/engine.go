@@ -19,6 +19,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -87,6 +88,11 @@ func New(adminKey string) (*Engine, error) {
 		sum := sha256.Sum256([]byte("fantom-cli-proxy-core-v1:" + adminKey))
 		internalKey = "ftm_internal_" + hex.EncodeToString(sum[:])
 	}
+	managementSecret, err := bcrypt.GenerateFromPassword([]byte(adminKey), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash embedded management key: %w", err)
+	}
+	managementSecretHash := string(managementSecret)
 
 	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("FANTOM_PUBLIC_URL")), "/")
 	configPath := filepath.Join(coreDir, "config.yaml")
@@ -114,7 +120,7 @@ func New(adminKey string) (*Engine, error) {
 			},
 			"management": map[string]any{
 				"allow-remote": true,
-				"secret-key": adminKey,
+				"secret-key": managementSecretHash,
 				"disable-control-panel": false,
 				"disable-auto-update-panel": true,
 				"base-url": publicURL,
@@ -141,7 +147,7 @@ func New(adminKey string) (*Engine, error) {
 	cfg.Port = port
 	cfg.AuthDir = authDir
 	cfg.APIKeys = []string{internalKey}
-	cfg.RemoteManagement.SecretKey = adminKey
+	cfg.RemoteManagement.SecretKey = managementSecretHash
 	cfg.RemoteManagement.AllowRemote = true
 	cfg.RemoteManagement.DisableAutoUpdatePanel = true
 	if publicURL != "" {

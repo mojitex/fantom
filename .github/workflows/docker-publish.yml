@@ -84,6 +84,11 @@ jobs:
           [[ "$management_code" == "401" ]]
           curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
             http://127.0.0.1:18080/v0/management/config >/dev/null
+          v8_code="$(curl -sS -o /tmp/fantom-v8-unauthorized.json -w '%{http_code}' \
+            http://127.0.0.1:18080/v8/management/credentials)"
+          [[ "$v8_code" == "401" ]]
+          curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
+            'http://127.0.0.1:18080/v8/management/credentials?page=1&page_size=10' | grep -q '"files"'
           echo "Fantom gateway and embedded router smoke test passed"
 
   docker:

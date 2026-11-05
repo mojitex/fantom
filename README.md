@@ -80,7 +80,7 @@ curl https://YOUR-DOMAIN/v1/chat/completions \
   }'
 ```
 
-Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` and the embedded `/v0/management/*` API require the environment-level `GATEWAY_API_KEY`; the `/management.html` page presents the embedded console login. Generated client keys cannot administer the gateway.
+Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` and the embedded `/v0/management/*` and `/v8/management/*` APIs require the environment-level `GATEWAY_API_KEY`. The embedded config stores only a bcrypt hash of this key; the `/management.html` page presents the embedded console login. Generated client keys cannot administer the gateway.
 
 ## Admin API
 
