@@ -143,6 +143,7 @@ type Server struct {
 	store       *adminStore
 	logger      *slog.Logger
 	handler     http.Handler
+	core        CoreRouter
 	requestID   atomic.Uint64
 }
 
@@ -177,6 +178,27 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
+	// Protocol endpoints not implemented by the compatibility gateway are served
+	// by the embedded CLIProxyAPI runtime after Fantom validates the client key.
+	mux.Handle("/v1/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/v1beta/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/openai/v1/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/backend-api/codex/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/v0/management", s.authenticateAdmin(s.handleCoreManagement))
+	mux.Handle("/v0/management/", s.authenticateAdmin(s.handleCoreManagement))
+	// v8 management routes power Fantom's native TypeScript account/quota control plane.
+	mux.HandleFunc("GET /v8/management/oauth/callback", s.handleCoreCallback)
+	mux.HandleFunc("POST /v8/management/oauth/callback", s.handleCoreCallback)
+	mux.Handle("/v8/management/", s.authenticateAdmin(s.handleCoreManagement))
+	// The static panel must be reachable so it can render its own login form.
+	// Its /v0/management API calls remain protected by Fantom and CLIProxyAPI.
+	mux.HandleFunc("/management.html", s.handleCoreManagement)
+	for _, callback := range []string{
+		"/anthropic/callback", "/codex/callback", "/antigravity/callback",
+		"/callback", "/devin/callback",
+	} {
+		mux.HandleFunc(callback, s.handleCoreCallback)
+	}
 	mux.HandleFunc("/", s.handleDashboard)
 	s.handler = s.withRequestID(mux)
 	return s
@@ -196,6 +218,9 @@ func (s *Server) Close() {
 
 	for _, provider := range providers {
 		provider.client.CloseIdleConnections()
+	}
+	if s.core != nil {
+		s.core.Close()
 	}
 	if s.store != nil {
 		s.store.Close()
@@ -317,6 +342,18 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for alias,route:=range state.Routes { if s.providerByID(route.Provider)!=nil { appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider}) } }
+	if s.core != nil {
+		coreModels, err := s.core.Models(r.Context())
+		if err != nil {
+			s.logger.Warn("embedded model catalog unavailable", "error", err)
+		} else {
+			for _, model := range coreModels {
+				ownedBy := model.OwnedBy
+				if ownedBy == "" { ownedBy = "cli-proxy-api" }
+				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy})
+			}
+		}
+	}
 	writeJSON(w,http.StatusOK,map[string]any{"object":"list","data":items})
 }
 
@@ -326,7 +363,7 @@ func (s *Server) providerModels(ctx context.Context, provider *providerRuntime) 
 	defer provider.catalogMu.Unlock()
 
 	const catalogTTL = 45 * time.Second
-	if len(provider.catalogModels)>0 && time.Since(provider.catalogFetchedAt)<catalogTTL {
+	if !provider.catalogFetchedAt.IsZero() && time.Since(provider.catalogFetchedAt)<catalogTTL {
 		return append([]string(nil),provider.catalogModels...)
 	}
 
@@ -417,6 +454,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var input modelRequest
 	if raw := payload["model"]; len(raw) == 0 || json.Unmarshal(raw, &input.Model) != nil || strings.TrimSpace(input.Model) == "" {
 		writeAPIError(w, http.StatusBadRequest, "model is required", "invalid_request_error")
+		return
+	}
+
+	// OAuth-backed and protocol-native models are delegated to the full Go
+	// runtime. Explicit Fantom aliases and configured provider models retain
+	// their established routing path until migrated into the new provider plane.
+	if s.core != nil && s.core.HasModel(r.Context(), input.Model) && !s.legacyModelMatch(r.Context(), input.Model) {
+		record.Model = input.Model
+		record.Provider = "cli-proxy-api"
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		s.core.APIProxy().ServeHTTP(w, r)
 		return
 	}
 

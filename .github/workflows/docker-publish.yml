@@ -20,8 +20,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.26.10"
           cache-dependency-path: go.mod
+      - name: Resolve Go module graph and checksums
+        run: go mod tidy
       - name: Test
         run: go test ./...
       - name: Vet
@@ -76,7 +78,18 @@ jobs:
 
           curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
             http://127.0.0.1:18080/v1/models | grep -q '"data"'
-          echo "Fantom container smoke test passed"
+
+          management_code="$(curl -sS -o /tmp/fantom-management-unauthorized.json -w '%{http_code}' \
+            http://127.0.0.1:18080/v0/management/config)"
+          [[ "$management_code" == "401" ]]
+          curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
+            http://127.0.0.1:18080/v0/management/config >/dev/null
+          v8_code="$(curl -sS -o /tmp/fantom-v8-unauthorized.json -w '%{http_code}' \
+            http://127.0.0.1:18080/v8/management/credentials)"
+          [[ "$v8_code" == "401" ]]
+          curl -fsS -H 'Authorization: Bearer ci-only-test-key' \
+            'http://127.0.0.1:18080/v8/management/credentials?page=1&page_size=10' | grep -q '"files"'
+          echo "Fantom gateway and embedded router smoke test passed"
 
   docker:
     name: Build and publish Docker image

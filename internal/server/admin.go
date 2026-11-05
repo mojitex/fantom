@@ -26,7 +26,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				runtime.catalogMu.Unlock()
 			}
 		}
-		writeJSON(w,http.StatusOK,map[string]any{"ok":true,"message":"Provider model catalogs invalidated"})
+		coreSyncErr := s.syncCoreProviders()
+		result := map[string]any{"ok":true,"message":"Provider model catalogs invalidated and mirrored to the embedded router","core_sync_ok":coreSyncErr==nil}
+		if coreSyncErr!=nil { result["core_sync_error"]=coreSyncErr.Error() }
+		writeJSON(w,http.StatusOK,result)
 		return
 	}
 	if len(parts)==1 && parts[0]=="providers" {
@@ -46,7 +49,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			case http.MethodDelete:
 				if err:=s.store.deleteProvider(id); err!=nil { adminError(w,http.StatusConflict,err.Error()); return }
 				s.reloadProviderRuntime()
-				writeJSON(w,http.StatusOK,map[string]any{"ok":true})
+				coreSyncErr := s.syncCoreProviders()
+				result := map[string]any{"ok":true,"core_sync_ok":coreSyncErr==nil}
+				if coreSyncErr!=nil { result["core_sync_error"]=coreSyncErr.Error(); s.logger.Warn("provider deleted but embedded router sync failed","provider",id,"error",coreSyncErr) }
+				writeJSON(w,http.StatusOK,result)
 			default: methodNotAllowed(w)
 			}
 			return
@@ -148,8 +154,16 @@ func (s *Server) saveProvider(w http.ResponseWriter,r *http.Request,id string) {
 	if existing!=nil && provider.ID!=existing.ID { adminError(w,http.StatusBadRequest,"provider ID cannot be changed"); return }
 	if err:=s.store.replaceProvider(provider); err!=nil { adminError(w,http.StatusInternalServerError,err.Error()); return }
 	s.reloadProviderRuntime()
+	coreSyncErr := s.syncCoreProviders()
 	latest:=s.store.snapshot()
-	for _,item:=range latest.Providers { if item.ID==provider.ID { writeJSON(w,http.StatusOK,map[string]any{"ok":true,"provider":providerViews([]persistedProvider{item})[0]}); return } }
+	for _,item:=range latest.Providers {
+		if item.ID==provider.ID {
+			result := map[string]any{"ok":true,"provider":providerViews([]persistedProvider{item})[0],"core_sync_ok":coreSyncErr==nil}
+			if coreSyncErr!=nil { result["core_sync_error"]=coreSyncErr.Error(); s.logger.Warn("provider saved but embedded router sync failed","provider",provider.ID,"error",coreSyncErr) }
+			writeJSON(w,http.StatusOK,result)
+			return
+		}
+	}
 	adminError(w,http.StatusInternalServerError,"provider saved but could not be reloaded")
 }
 func (s *Server) testProvider(w http.ResponseWriter,r *http.Request,id string) {

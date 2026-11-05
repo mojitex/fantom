@@ -142,3 +142,34 @@
     font-size: 10px;
   }
 }
+
+
+/* Native TypeScript account and quota control plane */
+.accounts-page{display:grid;gap:14px}
+.account-connect,.account-list-panel{padding:16px}
+.account-connect .panel-heading{align-items:flex-start}
+.account-connect .panel-heading .muted-copy{margin:8px 0 0;max-width:700px}
+.account-connect-controls{display:flex;gap:9px;max-width:560px;margin-top:14px}
+.account-connect-controls select{flex:1;min-width:0;min-height:38px;padding:0 10px;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font-size:11px}
+.account-oauth-note{margin:12px 0 0;max-width:880px;line-height:1.6}
+.oauth-session{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:15px;padding:12px;border:1px solid #4a416d;border-radius:8px;background:#17152a}
+.oauth-session>div:first-child{display:grid;gap:4px;flex:1 1 220px}
+.oauth-session>div:first-child b{font-size:11px}
+.oauth-session>div:first-child span{font-size:9px;color:var(--muted)}
+.oauth-session .secondary{display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:0 10px;text-decoration:none}
+.oauth-code{display:grid;gap:3px}
+.oauth-code small{font:8px var(--mono);color:var(--dim)}
+.oauth-code code,.oauth-code a{font:11px var(--mono);color:#c2b7ff}
+.accounts-table td{vertical-align:middle}
+.accounts-table td>b{display:block;color:#e1e6ef;font-size:10px}
+.account-subline{display:block;margin-top:4px;color:var(--dim);font-size:9px}
+.quota-cell{display:grid;gap:4px;min-width:140px}
+.quota-cell small{font-size:9px;color:var(--muted)}
+.quota-cell details{margin-top:3px}
+.quota-cell summary{cursor:pointer;color:#a99cff;font-size:9px}
+.quota-cell pre{max-width:300px;max-height:180px;overflow:auto;padding:8px;border:1px solid var(--line);border-radius:6px;background:#090e16;color:#aebbd0;font:8px/1.5 var(--mono)}
+.warning-text{color:#e9bd77;font-size:9px}
+.account-actions{display:flex;align-items:center;gap:4px}
+.account-actions .ghost{width:27px;height:27px;display:grid;place-items:center;padding:0}
+.account-bulk-actions{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;line-height:1.5}
+@media(max-width:760px){.account-connect-controls{max-width:none}.account-bulk-actions{align-items:flex-start;flex-direction:column}.account-actions{flex-wrap:wrap}}
