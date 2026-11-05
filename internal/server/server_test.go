@@ -395,8 +395,11 @@ func TestProviderCooldownSkipsThrottledCredentials(t *testing.T) {
 	// If every key is cooling down, do not fan out to every known-throttled key.
 	provider.cooldownCredential("healthy-key", http.StatusForbidden, "")
 	got = provider.apiKeysForRequest()
-	if len(got) != 1 {
-		t.Fatalf("all-cooling pool should probe only one key, got %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("all-cooling pool should not probe an active cooldown, got %#v", got)
+	}
+	if remaining := provider.credentialCooldownRemaining(); remaining <= 0 {
+		t.Fatalf("expected a positive retry delay, got %s", remaining)
 	}
 }
 
@@ -416,5 +419,55 @@ func TestCredentialCooldownHonorsAndBoundsRetryAfter(t *testing.T) {
 	}
 	if got := credentialCooldown(http.StatusBadGateway, "", now); got != 0 {
 		t.Fatalf("non-credential failure should not cool a key, got %s", got)
+	}
+}
+
+
+func TestChatReturnsRetryAfterWhenEveryCredentialIsCoolingDown(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "limited",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+		Providers: []config.Provider{{
+			ID: "limited", BaseURL: upstream.URL + "/v1", AuthType: "bearer",
+			APIKeys: []string{"limited-key"}, Models: []string{"test-model"}, TimeoutSeconds: 5,
+		}},
+		Routes: map[string]config.Route{},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	call := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	first := call()
+	if first.Code != http.StatusTooManyRequests {
+		t.Fatalf("first response = %d, want 429", first.Code)
+	}
+	second := call()
+	if second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second response = %d, want 503 while key is cooling down: %s", second.Code, second.Body.String())
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatal("503 response did not include Retry-After")
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream was called %d times, want only once during the cooldown window", got)
 	}
 }
