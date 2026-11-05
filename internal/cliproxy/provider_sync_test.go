@@ -18,6 +18,7 @@ func TestCompatibilityForProviderMapsNestedChatPathAndCredentialPool(t *testing.
 	if err != nil { t.Fatalf("compatibilityForProvider() error = %v", err) }
 	if !include { t.Fatal("expected OpenCode provider to be mirrored") }
 	if got.Name != "fantom-opencode-console" { t.Fatalf("provider name = %q", got.Name) }
+	if got.Prefix != managedProviderPrefixForID("OpenCode-Console") { t.Fatalf("provider prefix = %q", got.Prefix) }
 	if got.BaseURL != "https://opencode.ai/inference/openai/v1" { t.Fatalf("base URL = %q", got.BaseURL) }
 	if len(got.APIKeyEntries) != 2 { t.Fatalf("API key entries = %d, want 2", len(got.APIKeyEntries)) }
 	if got.APIKeyEntries[0].APIKey != "first-secret" || got.APIKeyEntries[1].APIKey != "second-secret" {
@@ -69,5 +70,20 @@ func TestCompatibilityForProviderSkipsWildcardWithoutResolvedModels(t *testing.T
 	}
 	if include {
 		t.Fatal("provider with an unresolved wildcard catalog must not publish an empty model group")
+	}
+}
+
+
+func TestEngineModelForProviderUsesNamespacedMapping(t *testing.T) {
+	engine := &Engine{managedModels: map[string]map[string]string{
+		"opencode-console": {
+			"kimi-k3": "fantom-opencode-abc123/kimi-k3",
+		},
+	}}
+	if got := engine.ModelForProvider("OpenCode-Console", "kimi-k3"); got != "fantom-opencode-abc123/kimi-k3" {
+		t.Fatalf("ModelForProvider() = %q", got)
+	}
+	if got := engine.ModelForProvider("missing", "kimi-k3"); got != "" {
+		t.Fatalf("unknown provider mapping = %q, want empty", got)
 	}
 }

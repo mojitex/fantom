@@ -47,6 +47,7 @@ type Engine struct {
 	cached      []Model
 	cachedAt    time.Time
 	refreshMu   sync.Mutex
+	managedModels map[string]map[string]string
 	runErrors   chan error
 }
 
@@ -205,6 +206,7 @@ func New(adminKey string) (*Engine, error) {
 		apiProxy: apiProxy,
 		adminProxy: adminProxy,
 		client: &http.Client{Timeout: 8 * time.Second},
+		managedModels: make(map[string]map[string]string),
 		runErrors: make(chan error, 1),
 	}, nil
 }
@@ -283,6 +285,18 @@ func (e *Engine) ManagementProxy() http.Handler {
 		})
 	}
 	return e.adminProxy
+}
+
+// ModelForProvider returns the private model identifier used by the embedded
+// runtime for a Fantom-managed provider/model pair. It returns an empty string
+// when the provider or model is not mirrored into the embedded runtime.
+func (e *Engine) ModelForProvider(providerID, model string) string {
+	if e == nil {
+		return ""
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.managedModels[strings.ToLower(strings.TrimSpace(providerID))][strings.TrimSpace(model)]
 }
 
 // Models returns the embedded runtime's catalog with a short cache to keep model

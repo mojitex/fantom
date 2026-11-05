@@ -268,10 +268,75 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 }
 
 func bearerToken(r *http.Request) (string, bool) {
-	value:=strings.TrimSpace(r.Header.Get("Authorization"))
-	const prefix="Bearer "
-	if !strings.HasPrefix(value,prefix) { return "",false }
-	return strings.TrimSpace(strings.TrimPrefix(value,prefix)),true
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	scheme, token, ok := strings.Cut(value, " ")
+	if !ok || !strings.EqualFold(strings.TrimSpace(scheme), "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(token)
+	return token, token != ""
+}
+
+// clientKeyCandidates accepts the credential shapes used by OpenAI-compatible,
+// Anthropic Messages, and Gemini clients. All of these authenticate to Fantom;
+// none are provider credentials.
+func clientKeyCandidates(r *http.Request) []string {
+	if r == nil {
+		return nil
+	}
+	values := make([]string, 0, 6)
+	if token, ok := bearerToken(r); ok {
+		values = append(values, token)
+	}
+	for _, name := range []string{"X-API-Key", "X-Goog-API-Key", "API-Key"} {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			values = append(values, value)
+		}
+	}
+	if r.URL != nil {
+		query := r.URL.Query()
+		for _, name := range []string{"key", "api_key"} {
+			for _, value := range query[name] {
+				if value = strings.TrimSpace(value); value != "" {
+					values = append(values, value)
+				}
+			}
+		}
+	}
+	unique := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
+}
+
+// stripClientCredentials prevents a client-side Fantom key from being forwarded
+// to an upstream provider. The embedded runtime installs its own internal key.
+func stripClientCredentials(r *http.Request) {
+	if r == nil {
+		return
+	}
+	for _, name := range []string{"Authorization", "X-API-Key", "X-Goog-API-Key", "API-Key"} {
+		r.Header.Del(name)
+	}
+	if r.URL != nil {
+		query := r.URL.Query()
+		changed := false
+		for _, name := range []string{"key", "api_key"} {
+			if _, exists := query[name]; exists {
+				query.Del(name)
+				changed = true
+			}
+		}
+		if changed {
+			r.URL.RawQuery = query.Encode()
+		}
+	}
 }
 
 func (s *Server) environmentKeyValid(provided string) bool {
@@ -283,15 +348,22 @@ func (s *Server) environmentKeyValid(provided string) bool {
 }
 
 func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter,r *http.Request) {
-		provided,ok:=bearerToken(r)
-		valid:=ok && s.environmentKeyValid(provided)
-		if ok && !valid && s.store!=nil { valid=s.store.keyValid(provided) }
+	return func(w http.ResponseWriter, r *http.Request) {
+		valid := false
+		for _, provided := range clientKeyCandidates(r) {
+			if s.environmentKeyValid(provided) {
+				valid = true
+			}
+			if s.store != nil && s.store.keyValid(provided) {
+				valid = true
+			}
+		}
 		if !valid {
-			writeAPIError(w,http.StatusUnauthorized,"missing or invalid bearer token","authentication_error")
+			writeAPIError(w, http.StatusUnauthorized, "missing or invalid API key", "authentication_error")
 			return
 		}
-		next(w,r)
+		stripClientCredentials(r)
+		next(w, r)
 	}
 }
 
@@ -348,6 +420,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("embedded model catalog unavailable", "error", err)
 		} else {
 			for _, model := range coreModels {
+				// Fantom-managed provider aliases are private routing IDs. The
+				// public raw model IDs are already present in Fantom's own catalog.
+				if strings.HasPrefix(strings.ToLower(model.ID), "fantom-") {
+					continue
+				}
 				ownedBy := model.OwnedBy
 				if ownedBy == "" { ownedBy = "cli-proxy-api" }
 				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy})
