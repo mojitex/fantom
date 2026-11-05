@@ -186,7 +186,9 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	mux.Handle("/backend-api/codex/", s.authenticate(s.handleCoreAPI))
 	mux.Handle("/v0/management", s.authenticateAdmin(s.handleCoreManagement))
 	mux.Handle("/v0/management/", s.authenticateAdmin(s.handleCoreManagement))
-	mux.Handle("/management.html", s.authenticateAdmin(s.handleCoreManagement))
+	// The static panel must be reachable so it can render its own login form.
+	// Its /v0/management API calls remain protected by Fantom and CLIProxyAPI.
+	mux.HandleFunc("/management.html", s.handleCoreManagement)
 	for _, callback := range []string{
 		"/anthropic/callback", "/codex/callback", "/antigravity/callback",
 		"/devin/callback", "/kimi/callback", "/kimi-ai/callback",

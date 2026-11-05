@@ -115,7 +115,7 @@ export default function Home(){
  return <div className="app-shell">
   <aside className="sidebar">
    <div className="sidebar-brand"><div className="brand-symbol">F</div><div><b>FANTOM</b><span>ROUTING ENGINE</span></div><span className="version-tag">0.2</span></div>
-   <nav className="simple-nav">{nav.map(n=><button key={n.id} className={cls("nav-link",page===n.id&&"selected")} onClick={()=>{setPage(n.id);setError("");setNotice("");}}><Icon name={n.glyph}/><span>{n.label}</span>{n.id==="providers"&&<small>{snapshot?.providers?.length||0}</small>}</button>)}</nav>
+   <nav className="simple-nav">{nav.map(n=><button key={n.id} className={cls("nav-link",page===n.id&&"selected")} onClick={()=>{setPage(n.id);setError("");setNotice("");}}><Icon name={n.glyph}/><span>{n.label}</span>{n.id==="providers"&&<small>{snapshot?.providers?.length||0}</small>}</button>)}<a className="nav-link" href="/management.html" target="_blank" rel="noreferrer" title="Open the full provider, OAuth and quota management console"><Icon name="external"/><span>Router Console</span></a></nav>
    <div className="sidebar-bottom"><button className={cls("nav-link",page==="settings"&&"selected")} onClick={()=>setPage("settings")}><Icon name="settings"/> <span>Settings</span></button><button className="nav-link signout" onClick={signOut}><Icon name="logout"/> <span>Sign out</span></button><div className="sidebar-meta">FANTOM <span>AI ROUTER</span></div></div>
   </aside>
   <main className="main-area">

@@ -31,7 +31,7 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 
 Fantom now embeds the MIT-licensed [CLIProxyAPI Go SDK](https://github.com/router-for-me/CLIProxyAPI) as an in-process service with a private loopback listener. Fantom remains the public gateway: it validates application keys before proxying inference traffic, while the embedded engine owns provider executors, OAuth credential files, token refresh, account selection, protocol compatibility and native streaming.
 
-The embedded runtime exposes its management API through Fantom at `/v0/management/*` and its advanced control panel at `/management.html`. These paths require the environment-level `GATEWAY_API_KEY`. OAuth callbacks are forwarded through the public Fantom listener. OAuth state and the embedded runtime configuration are stored under `FANTOM_DATA_DIR/cli-proxy`; attach a persistent volume to retain accounts across restarts.
+The embedded runtime exposes its management API through Fantom at `/v0/management/*` and its advanced control panel at `/management.html`. The control-panel page is reachable so it can render its login form; management operations require the environment-level `GATEWAY_API_KEY`. A direct link is available as **Router Console** in the TypeScript dashboard. OAuth callbacks are forwarded through the public Fantom listener. OAuth state and the embedded runtime configuration are stored under `FANTOM_DATA_DIR/cli-proxy`; attach a persistent volume to retain accounts across restarts.
 
 The two routing planes are intentionally staged: models already owned by Fantom's configured providers and explicit aliases continue through Fantom's existing provider path; models discovered from OAuth/account-backed providers are delegated to the embedded runtime. This avoids silently breaking existing NVIDIA NIM and OpenCode configurations while the provider-management UI is migrated.
 
@@ -80,7 +80,7 @@ curl https://YOUR-DOMAIN/v1/chat/completions \
   }'
 ```
 
-Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*`, the embedded `/v0/management/*` API and `/management.html` require the environment-level `GATEWAY_API_KEY`; generated client keys cannot administer the gateway.
+Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` and the embedded `/v0/management/*` API require the environment-level `GATEWAY_API_KEY`; the `/management.html` page presents the embedded console login. Generated client keys cannot administer the gateway.
 
 ## Admin API
 

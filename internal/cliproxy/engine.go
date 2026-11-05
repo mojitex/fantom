@@ -93,18 +93,26 @@ func New(adminKey string) (*Engine, error) {
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		initial := map[string]any{
 			"config-version": 8,
-			"host": "127.0.0.1",
-			"port": port,
-			"auth-dir": authDir,
-			"api-keys": []string{internalKey},
-			"request-log": true,
-			"usage-statistics-enabled": true,
+			"server": map[string]any{
+				"host": "127.0.0.1",
+				"port": port,
+			},
+			"oauth": map[string]any{
+				"auth-dir": authDir,
+			},
+			"access": map[string]any{
+				"api-keys": []string{internalKey},
+			},
+			"observability": map[string]any{
+				"logs": map[string]any{"request-log": true},
+				"usage": map[string]any{"usage-statistics-enabled": true},
+			},
 			"routing": map[string]any{
 				"strategy": "weighted-round-robin",
 				"session-affinity": true,
 				"session-affinity-ttl": "1h",
 			},
-			"remote-management": map[string]any{
+			"management": map[string]any{
 				"allow-remote": true,
 				"secret-key": adminKey,
 				"disable-control-panel": false,
