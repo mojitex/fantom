@@ -131,7 +131,7 @@ export default function Home(){
     {page==="accounts"&&<AccountsPage request={request}/>}
     {page==="combos"&&<Routing routes={snapshot?.routes||{}} providers={snapshot?.providers||[]} alias={alias} setAlias={setAlias} routeProvider={routeProvider||snapshot?.providers?.[0]?.id||""} setRouteProvider={setRouteProvider} upstreamModel={upstreamModel} setUpstreamModel={setUpstreamModel} fallbackModels={fallbackModels} setFallbackModels={setFallbackModels} onSave={saveRoute} onRemove={removeRoute}/>}
     {page==="usage"&&<UsagePage usage={usage} requests={snapshot?.requests||[]}/>}
-    {page==="settings"&&<form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form>}
+    {page==="settings"&&<><form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form><CoreRoutingSettings request={request}/></>}
    </div>
    <footer className="app-footer"><span>FANTOM CONTROL PLANE <b>0.2</b></span><span>ONE ENDPOINT. TOTAL CONTROL.</span></footer>
   </main>
@@ -167,7 +167,7 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
   <div className="metrics-grid three"><Metric label="CONNECTED ACCOUNTS" value={formatNumber(accounts.length)} detail="OAuth and file credentials" glyph="shield" tone="violet"/><Metric label="ACTIVE CREDENTIALS" value={formatNumber(accounts.filter(a=>!a.disabled&&!a.unavailable).length)} detail="Eligible for routing" glyph="check" tone="green"/><Metric label="NEEDS ATTENTION" value={formatNumber(attention)} detail="Quota, sign-in or cooldown state" glyph="alert" tone="amber"/></div>
   {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button onClick={()=>{setError("");setNotice("");}}>×</button></div>}
   <section className="panel account-connect"><div className="panel-heading"><div><div className="eyebrow">ACCOUNT ONBOARDING</div><h3>Connect an account</h3><p className="muted-copy">Add subscription-backed providers through their native OAuth or device login flow.</p></div><span className="tag green">GO RUNTIME</span></div>
-   <div className="account-connect-controls"><select value={provider} onChange={e=>setProvider(e.target.value)}>{oauthProviders.map(p=><option value={p.id} key={p.id}>{p.label}</option>)}</select><button className="primary" onClick={()=>void startLogin()} disabled={!!busy}><Icon name="plus" size={14}/>{busy==="oauth"?"Starting…":"Start sign-in"}</button></div>
+   <div className="account-connect-controls"><select value={provider} onChange={e=>setProvider(e.target.value)} disabled={!!busy||!!oauthState}>{oauthProviders.map(p=><option value={p.id} key={p.id}>{p.label}</option>)}</select><button className="primary" onClick={()=>void startLogin()} disabled={!!busy}><Icon name="plus" size={14}/>{busy==="oauth"?"Starting…":"Start sign-in"}</button></div>
    <p className="muted-copy account-oauth-note">Complete sign-in in the provider window. When a browser flow redirects to localhost and the page cannot open on this server, copy the full URL from the browser address bar and paste it below; Fantom validates the OAuth state before accepting it.</p>
    {(oauthUrl||oauthState||oauthDetails?.user_code)&&<div className="oauth-session"><div><b>Authentication session</b><span>{oauthStatus}</span></div>{oauthUrl&&<a className="secondary" href={oauthUrl} target="_blank" rel="noreferrer"><Icon name="external" size={14}/> Open provider sign-in</a>}{oauthDetails?.user_code&&<div className="oauth-code"><small>DEVICE CODE</small><code>{String(oauthDetails.user_code)}</code></div>}{oauthDetails?.verification_uri&&<div className="oauth-code"><small>VERIFICATION PAGE</small><a href={String(oauthDetails.verification_uri)} target="_blank" rel="noreferrer">{String(oauthDetails.verification_uri)}</a></div>}<div className="oauth-manual-callback"><label htmlFor="oauth-redirect-url">CALLBACK URL (OPTIONAL)</label><textarea id="oauth-redirect-url" className="oauth-redirect-input" value={redirectURL} onChange={e=>setRedirectURL(e.target.value)} rows={2} placeholder="Paste the full localhost callback URL here…"/><button className="secondary" onClick={()=>void submitRedirectCallback()} disabled={!!busy||!oauthState||!redirectURL.trim()}><Icon name="check" size={14}/>{busy==="callback"?"Submitting…":"Submit callback URL"}</button></div><button className="secondary" onClick={()=>void checkLogin()} disabled={!!busy||!oauthState}><Icon name="refresh" size={14}/>{busy==="poll"?"Checking…":"Check login status"}</button></div>}
   </section>
@@ -190,6 +190,78 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
    <div className="account-bulk-actions"><span>Token lifecycle is managed by the Go runtime. Refreshing is explicit here; automatic token refresh remains active in the engine.</span><button className="secondary" disabled={!!busy||accounts.length===0} onClick={()=>void runAction("refresh-all",()=>request("/v8/management/credentials/refresh",{method:"POST",body:JSON.stringify({all:true})}),"Bulk refresh started.")}>Refresh all credentials</button></div>
   </section>
  </div>;
+}
+
+
+function CoreRoutingSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
+ const [strategy,setStrategy]=useState("weighted-round-robin");
+ const [requestRetry,setRequestRetry]=useState(2);
+ const [maxRetryCredentials,setMaxRetryCredentials]=useState(0);
+ const [maxRetryInterval,setMaxRetryInterval]=useState(30);
+ const [sessionAffinity,setSessionAffinity]=useState(true);
+ const [sessionAffinityTTL,setSessionAffinityTTL]=useState("1h");
+ const [sessionAffinitySubagents,setSessionAffinitySubagents]=useState(true);
+ const [loading,setLoading]=useState(false);
+ const [saving,setSaving]=useState(false);
+ const [error,setError]=useState("");
+ const [notice,setNotice]=useState("");
+ const load=useCallback(async()=>{
+  setLoading(true);setError("");
+  try{
+   const [routing,retry,credentials,interval]=await Promise.all([
+    request("/v8/management/config/routing"),
+    request("/v0/management/request-retry"),
+    request("/v0/management/max-retry-credentials"),
+    request("/v0/management/max-retry-interval")
+   ]);
+   setStrategy(String(routing.strategy||"round-robin"));
+   setSessionAffinity(Boolean(routing["session-affinity"]));
+   setSessionAffinityTTL(String(routing["session-affinity-ttl"]||"1h"));
+   setSessionAffinitySubagents(routing["session-affinity-subagents"]!==false);
+   setRequestRetry(Number(retry["request-retry"]??0));
+   setMaxRetryCredentials(Number(credentials["max-retry-credentials"]??0));
+   setMaxRetryInterval(Number(interval["max-retry-interval"]??0));
+  }catch(e){setError(e instanceof Error?e.message:"Could not load advanced routing settings");}
+  finally{setLoading(false);}
+ },[request]);
+ useEffect(()=>{void load();},[load]);
+ async function save(e:FormEvent){
+  e.preventDefault();setSaving(true);setError("");setNotice("");
+  try{
+   await Promise.all([
+    request("/v8/management/config/routing",{method:"PATCH",body:JSON.stringify({
+     strategy,
+     "session-affinity":sessionAffinity,
+     "session-affinity-ttl":sessionAffinityTTL,
+     "session-affinity-subagents":sessionAffinitySubagents
+    })}),
+    request("/v0/management/request-retry",{method:"PUT",body:JSON.stringify({value:requestRetry})}),
+    request("/v0/management/max-retry-credentials",{method:"PUT",body:JSON.stringify({value:maxRetryCredentials})}),
+    request("/v0/management/max-retry-interval",{method:"PUT",body:JSON.stringify({value:maxRetryInterval})})
+   ]);
+   setNotice("Routing policy and retry limits saved to the Go runtime.");
+   await load();
+  }catch(e){setError(e instanceof Error?e.message:"Could not save routing policy");}
+  finally{setSaving(false);}
+ }
+ return <form onSubmit={save} className="core-routing-settings">
+  <div className="page-heading compact"><div><div className="eyebrow">GO ROUTING ENGINE</div><h2>Routing policy & failover</h2><p>Control account selection, session affinity, retry rounds and cooldown waits.</p></div><button type="button" className="secondary" onClick={()=>void load()} disabled={loading||saving}><Icon name="refresh" size={14}/> Refresh</button></div>
+  {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button type="button" onClick={()=>{setError("");setNotice("");}}>×</button></div>}
+  <div className="core-routing-grid">
+   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Account selection</b><span>Choose how the Go runtime distributes requests across compatible credentials.</span></div></div>
+    <label>ROUTING STRATEGY</label><select value={strategy} onChange={e=>setStrategy(e.target.value)}><option value="round-robin">Round robin</option><option value="weighted-round-robin">Weighted round robin</option><option value="fill-first">Fill first</option></select>
+    <div className="setting-toggle"><div><b>Session affinity</b><span>Keep requests from the same coding session on the same account to improve cache reuse.</span></div><input type="checkbox" checked={sessionAffinity} onChange={e=>setSessionAffinity(e.target.checked)}/></div>
+    <label>SESSION AFFINITY TTL</label><select value={sessionAffinityTTL} onChange={e=>setSessionAffinityTTL(e.target.value)} disabled={!sessionAffinity}><option value="15m">15 minutes</option><option value="30m">30 minutes</option><option value="1h">1 hour</option><option value="2h">2 hours</option><option value="6h">6 hours</option><option value="12h">12 hours</option></select>
+    <div className="setting-toggle"><div><b>Inherit affinity for subagents</b><span>Keep child-agent tasks on the parent session account.</span></div><input type="checkbox" checked={sessionAffinitySubagents} onChange={e=>setSessionAffinitySubagents(e.target.checked)} disabled={!sessionAffinity}/></div>
+   </section>
+   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="refresh"/></div><div><b>Retry & cooldown</b><span>Bound retries so provider outages do not create unbounded request delays.</span></div></div>
+    <label>ADDITIONAL RETRY ROUNDS</label><input type="number" min="0" max="20" value={requestRetry} onChange={e=>setRequestRetry(Math.max(0,Number(e.target.value)||0))}/>
+    <label>MAX CREDENTIALS PER ROUND <span className="field-hint">0 = all eligible accounts</span></label><input type="number" min="0" max="1000" value={maxRetryCredentials} onChange={e=>setMaxRetryCredentials(Math.max(0,Number(e.target.value)||0))}/>
+    <label>MAX COOLDOWN WAIT (SECONDS) <span className="field-hint">0 = no waiting</span></label><input type="number" min="0" max="3600" value={maxRetryInterval} onChange={e=>setMaxRetryInterval(Math.max(0,Number(e.target.value)||0))}/>
+   </section>
+  </div>
+  <div className="settings-save"><span>These settings are saved in the persistent Go runtime config and reloaded by the SDK.</span><button className="primary" disabled={saving||loading}>{saving?"SAVING…":"Save routing policy"} <Icon name="check" size={15}/></button></div>
+ </form>;
 }
 
 function pageTitle(p:Page){return ({endpoint:"Endpoint & Key",providers:"Providers",combos:"Combos",usage:"Usage",settings:"Settings"} as Record<Page,string>)[p]}
