@@ -40,9 +40,9 @@ func (p *providerRuntime) apiKey() string {
 	return p.config.APIKeys[index]
 }
 
-// apiKeysForRequest returns a complete credential rotation beginning at the next
-// round-robin position. A failed credential can therefore be skipped without
-// permanently pinning a provider to a revoked or rate-limited key.
+// apiKeysForRequest rotates through credentials that are not currently cooling
+// down. An empty result means every configured credential is temporarily
+// unavailable and routing should try another candidate rather than hammer them.
 func (p *providerRuntime) apiKeysForRequest() []string {
 	keys := p.config.APIKeys
 	if len(keys) == 0 {
@@ -77,6 +77,7 @@ func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter 
 	}
 	p.keyMu.Lock()
 	defer p.keyMu.Unlock()
+	until := time.Now().Add(duration)
 	for index, configured := range p.config.APIKeys {
 		if configured != key {
 			continue
@@ -84,11 +85,9 @@ func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter 
 		if index >= len(p.keyCooldowns) {
 			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
 		}
-		until := time.Now().Add(duration)
 		if until.After(p.keyCooldowns[index]) {
 			p.keyCooldowns[index] = until
 		}
-		return
 	}
 }
 
