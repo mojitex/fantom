@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/subtle"
 	"encoding/json"
@@ -30,6 +31,20 @@ func (p *providerRuntime) apiKey() string {
 	if len(p.config.APIKeys) == 0 { return "" }
 	index := (p.nextKey.Add(1) - 1) % uint64(len(p.config.APIKeys))
 	return p.config.APIKeys[index]
+}
+
+// apiKeysForRequest returns a complete credential rotation beginning at the next
+// round-robin position. A failed credential can therefore be skipped without
+// permanently pinning a provider to a revoked or rate-limited key.
+func (p *providerRuntime) apiKeysForRequest() []string {
+	keys := p.config.APIKeys
+	if len(keys) == 0 { return []string{""} }
+	start := int((p.nextKey.Add(1) - 1) % uint64(len(keys)))
+	ordered := make([]string, 0, len(keys))
+	for i := 0; i < len(keys); i++ {
+		ordered = append(ordered, keys[(start+i)%len(keys)])
+	}
+	return ordered
 }
 
 type Server struct {
@@ -262,9 +277,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		provider:=s.providerByID(target.ProviderID)
 		record.Provider=target.ProviderID
 		if provider==nil { lastErr=fmt.Errorf("provider %q is not available",target.ProviderID); continue }
-		key:=provider.apiKey()
-		if provider.config.AuthType=="bearer"&&key=="" { lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID); continue }
-
 		attemptPayload:=make(map[string]json.RawMessage,len(payload))
 		for name,value:=range payload { attemptPayload[name]=value }
 		modelJSON,_:=json.Marshal(target.UpstreamModel)
@@ -278,34 +290,50 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Fantom-Estimated-Tokens-Saved",fmt.Sprint(optimizationStats.SavedBytes()/4))
 		}
 
-		upstreamRequest,requestErr:=http.NewRequestWithContext(r.Context(),http.MethodPost,provider.config.BaseURL+provider.config.ChatPath,bytes.NewReader(attemptBody))
-		if requestErr!=nil { lastErr=requestErr; continue }
-		upstreamRequest.Header.Set("Content-Type","application/json")
-		accept:=strings.TrimSpace(r.Header.Get("Accept")); if accept=="" { accept="application/json" }
-		upstreamRequest.Header.Set("Accept",accept)
-		upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
-		if provider.config.ID=="opencode-console" {
-			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\r\n") {
-				upstreamRequest.Header.Set("x-opencode-session",session)
+		keyAttempts:=provider.apiKeysForRequest()
+		for keyIndex,key:=range keyAttempts {
+			if provider.config.AuthType=="bearer"&&key=="" {
+				lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID)
+				break
 			}
+			upstreamRequest,requestErr:=http.NewRequestWithContext(r.Context(),http.MethodPost,provider.config.BaseURL+provider.config.ChatPath,bytes.NewReader(attemptBody))
+			if requestErr!=nil { lastErr=requestErr; break }
+			upstreamRequest.Header.Set("Content-Type","application/json")
+			accept:=strings.TrimSpace(r.Header.Get("Accept")); if accept=="" { accept="application/json" }
+			upstreamRequest.Header.Set("Accept",accept)
+			upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
+			if provider.config.ID=="opencode-console" {
+				if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\\r\\n") {
+					upstreamRequest.Header.Set("x-opencode-session",session)
+				}
+			}
+			s.applyProviderHeaders(upstreamRequest,provider,key)
+			attempts++
+			response,requestErr=provider.client.Do(upstreamRequest)
+			if requestErr!=nil {
+				if r.Context().Err()!=nil { return }
+				lastErr=requestErr
+				s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
+				response=nil
+				if keyIndex<len(keyAttempts)-1 { continue }
+				break
+			}
+			if shouldRetryCredential(response.StatusCode)&&keyIndex<len(keyAttempts)-1 {
+				lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
+				_ = response.Body.Close()
+				response=nil
+				continue
+			}
+			break
 		}
-		s.applyProviderHeaders(upstreamRequest,provider,key)
-		attempts++
-		response,requestErr=provider.client.Do(upstreamRequest)
-		if requestErr!=nil {
-			if r.Context().Err()!=nil { return }
-			lastErr=requestErr
-			s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
-			response=nil
-			continue
-		}
-		if shouldFallback(response.StatusCode)&&candidateIndex<len(candidates)-1 {
+		if response!=nil && shouldFallback(response.StatusCode)&&candidateIndex<len(candidates)-1 {
 			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
 			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
 			_ = response.Body.Close()
 			response=nil
 			continue
 		}
+		if response==nil { continue }
 		selectedProvider=provider
 		record.Provider=provider.config.ID
 		break
@@ -324,20 +352,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if attempts>1 { w.Header().Set("X-Fantom-Fallback-Attempts",fmt.Sprint(attempts-1)) }
 	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
-	s.streamBody(w,response.Body)
+	s.streamBodyWithUsage(w,response.Body,&record,response.Header.Get("Content-Type"))
 	if response.StatusCode>=500 {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
 	}
 }
 
-func shouldFallback(status int) bool {
+func shouldRetryCredential(status int) bool {
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	default:
 		return false
 	}
+}
+
+func shouldFallback(status int) bool {
+	return shouldRetryCredential(status)
 }
 
 func normalizedMode(value string, allowed ...string) string {
@@ -359,20 +391,74 @@ func (s *Server) applyProviderHeaders(req *http.Request, provider *providerRunti
 	req.Header.Set("User-Agent", "Fantom-AI-Gateway/0.1")
 }
 
-func (s *Server) streamBody(w http.ResponseWriter, body io.Reader) {
+func (s *Server) streamBodyWithUsage(w http.ResponseWriter, body io.Reader, record *requestRecord, contentType string) {
 	controller := http.NewResponseController(w)
 	buffer := make([]byte, 32*1024)
+	const maxUsageCapture = 8 << 20
+	var captured bytes.Buffer
+	captureEnabled := true
 	for {
 		n, readErr := body.Read(buffer)
 		if n > 0 {
+			if captureEnabled {
+				if captured.Len()+n <= maxUsageCapture {
+					_, _ = captured.Write(buffer[:n])
+				} else {
+					// Never let observability buffering grow with an unbounded model stream.
+					captureEnabled = false
+					captured.Reset()
+				}
+			}
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil { return }
 			_ = controller.Flush()
 		}
 		if readErr != nil {
 			if readErr != io.EOF { s.logger.Warn("error while streaming upstream response", "error", readErr) }
+			if captureEnabled && record != nil { captureProviderUsage(captured.Bytes(),contentType,record) }
 			return
 		}
 	}
+}
+
+type usageValues struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+}
+
+func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
+	apply := func(values usageValues) {
+		if values.PromptTokens == 0 { values.PromptTokens = values.InputTokens }
+		if values.CompletionTokens == 0 { values.CompletionTokens = values.OutputTokens }
+		if values.PromptTokens > 0 { record.PromptTokens = values.PromptTokens }
+		if values.CompletionTokens > 0 { record.CompletionTokens = values.CompletionTokens }
+		if values.TotalTokens > 0 { record.TotalTokens = values.TotalTokens } else if record.PromptTokens+record.CompletionTokens > 0 {
+			record.TotalTokens = record.PromptTokens+record.CompletionTokens
+		}
+	}
+	if strings.Contains(strings.ToLower(contentType),"text/event-stream") {
+		scanner := bufio.NewScanner(bytes.NewReader(body))
+		scanner.Buffer(make([]byte, 64*1024), 1<<20)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if !strings.HasPrefix(line,"data:") { continue }
+			data := strings.TrimSpace(strings.TrimPrefix(line,"data:"))
+			if data == "" || data == "[DONE]" { continue }
+			var envelope struct {
+				Usage usageValues `json:"usage"`
+				Message struct { Usage usageValues `json:"usage"` } `json:"message"`
+			}
+			if json.Unmarshal([]byte(data),&envelope)==nil {
+				apply(envelope.Message.Usage)
+				apply(envelope.Usage)
+			}
+		}
+		return
+	}
+	var envelope struct { Usage usageValues `json:"usage"` }
+	if json.Unmarshal(body,&envelope)==nil { apply(envelope.Usage) }
 }
 
 func copyResponseHeaders(dst, src http.Header) {

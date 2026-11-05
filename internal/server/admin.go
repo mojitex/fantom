@@ -140,18 +140,89 @@ func (s *Server) saveProvider(w http.ResponseWriter,r *http.Request,id string) {
 }
 func (s *Server) testProvider(w http.ResponseWriter,r *http.Request,id string) {
 	var target *providerRuntime
-	for _,saved:=range s.store.snapshot().Providers { if saved.ID==id { p:=saved.runtime(); target=newProviderRuntime(p); break } }
+	for _,saved:=range s.store.snapshot().Providers {
+		if saved.ID==id { p:=saved.runtime(); target=newProviderRuntime(p); break }
+	}
 	if target==nil { adminError(w,http.StatusNotFound,"provider not found"); return }
+
+	var input struct { Model string `json:"model"` }
+	if r.Body!=nil {
+		r.Body=http.MaxBytesReader(w,r.Body,16<<10)
+		_ = json.NewDecoder(r.Body).Decode(&input)
+	}
+	model:=strings.TrimSpace(input.Model)
+	if model=="" {
+		for _,candidate:=range target.config.Models {
+			if strings.TrimSpace(candidate)!="" && candidate!="*" { model=strings.TrimSpace(candidate); break }
+		}
+	}
+	catalogOK:=false
+	catalogStatus:=0
 	modelsURL:=target.config.ModelsURL
 	if modelsURL=="" { modelsURL=target.config.BaseURL+"/models" }
-	req,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,modelsURL,nil)
-	if err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
-	key:=target.apiKey(); s.applyProviderHeaders(req,target,key)
-	resp,err:=target.client.Do(req)
-	if err!=nil { writeJSON(w,http.StatusOK,map[string]any{"ok":false,"provider":id,"error":err.Error()}); return }
-	defer resp.Body.Close()
-	_,_=io.Copy(io.Discard,io.LimitReader(resp.Body,2<<20))
-	writeJSON(w,http.StatusOK,map[string]any{"ok":resp.StatusCode>=200&&resp.StatusCode<300,"provider":id,"http_status":resp.StatusCode,"message":http.StatusText(resp.StatusCode),"tested_at":time.Now().UTC()})
+	for _,key:=range target.apiKeysForRequest() {
+		if target.config.AuthType=="bearer"&&key=="" { break }
+		catalogRequest,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,modelsURL,nil)
+		if err!=nil { break }
+		s.applyProviderHeaders(catalogRequest,target,key)
+		catalogResponse,err:=target.client.Do(catalogRequest)
+		if err!=nil { continue }
+		catalogStatus=catalogResponse.StatusCode
+		if catalogStatus>=200&&catalogStatus<300 {
+			catalogOK=true
+			if model=="" {
+				var remote upstreamModelList
+				if json.NewDecoder(io.LimitReader(catalogResponse.Body,8<<20)).Decode(&remote)==nil {
+					for _,candidate:=range remote.Data {
+						if candidate.ID!=""&&modelAllowed(target.config.Models,candidate.ID) { model=candidate.ID; break }
+					}
+				}
+			}
+		}
+		_ = catalogResponse.Body.Close()
+		if catalogOK || !shouldRetryCredential(catalogStatus) { break }
+	}
+	if model=="" {
+		writeJSON(w,http.StatusOK,map[string]any{
+			"ok":false,"provider":id,"catalog_ok":catalogOK,"catalog_status":catalogStatus,
+			"error":"The model catalog did not provide a testable model. Configure an explicit model ID or supply a model in the test request.",
+			"tested_at":time.Now().UTC(),
+		})
+		return
+	}
+
+	payload,_:=json.Marshal(map[string]any{
+		"model":model,
+		"messages":[]map[string]string{{"role":"user","content":"Reply with OK."}},
+		"max_tokens":8,
+		"stream":false,
+	})
+	started:=time.Now()
+	var chatStatus int
+	var chatError string
+	for _,key:=range target.apiKeysForRequest() {
+		if target.config.AuthType=="bearer"&&key=="" { chatError="provider has no API key"; break }
+		chatRequest,err:=http.NewRequestWithContext(r.Context(),http.MethodPost,target.config.BaseURL+target.config.ChatPath,bytes.NewReader(payload))
+		if err!=nil { chatError=err.Error(); break }
+		chatRequest.Header.Set("Content-Type","application/json")
+		chatRequest.Header.Set("Accept","application/json")
+		s.applyProviderHeaders(chatRequest,target,key)
+		chatResponse,err:=target.client.Do(chatRequest)
+		if err!=nil { chatError=err.Error(); continue }
+		chatStatus=chatResponse.StatusCode
+		_,_=io.Copy(io.Discard,io.LimitReader(chatResponse.Body,1<<20))
+		_ = chatResponse.Body.Close()
+		if chatStatus>=200&&chatStatus<300 { chatError=""; break }
+		chatError=http.StatusText(chatStatus)
+		if !shouldRetryCredential(chatStatus) { break }
+	}
+	latency:=time.Since(started).Milliseconds()
+	ok:=chatStatus>=200&&chatStatus<300
+	writeJSON(w,http.StatusOK,map[string]any{
+		"ok":ok,"provider":id,"catalog_ok":catalogOK,"catalog_status":catalogStatus,
+		"chat_ok":ok,"chat_status":chatStatus,"test_model":model,"latency_ms":latency,
+		"error":chatError,"tested_at":time.Now().UTC(),
+	})
 }
 func tailRequests(items []requestRecord,limit int) []requestRecord {
 	if limit>len(items) { limit=len(items) }
@@ -161,12 +232,23 @@ func tailRequests(items []requestRecord,limit int) []requestRecord {
 }
 func (s *Server) usageSummary(items []requestRecord) map[string]any {
 	var total,success,failed int
-	var latency int64
+	var latency,promptTokens,completionTokens,totalTokens int64
 	providers:=map[string]int{}
 	models:=map[string]int{}
-	for _,item:=range items { total++; latency+=item.LatencyMS; providers[item.Provider]++; models[item.Model]++; if item.Status>=200&&item.Status<400 { success++ } else { failed++ } }
+	for _,item:=range items {
+		total++; latency+=item.LatencyMS
+		promptTokens+=item.PromptTokens
+		completionTokens+=item.CompletionTokens
+		totalTokens+=item.TotalTokens
+		providers[item.Provider]++; models[item.Model]++
+		if item.Status>=200&&item.Status<400 { success++ } else { failed++ }
+	}
 	avg:=int64(0); if total>0 { avg=latency/int64(total) }
-	return map[string]any{"total_requests":total,"successful_requests":success,"failed_requests":failed,"avg_latency_ms":avg,"by_provider":providers,"by_model":models}
+	return map[string]any{
+		"total_requests":total,"successful_requests":success,"failed_requests":failed,"avg_latency_ms":avg,
+		"total_prompt_tokens":promptTokens,"total_completion_tokens":completionTokens,"total_tokens":totalTokens,
+		"by_provider":providers,"by_model":models,
+	}
 }
 
 var _ = errors.New

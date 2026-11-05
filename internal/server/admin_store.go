@@ -47,13 +47,16 @@ type storedClientKey struct {
 }
 
 type requestRecord struct {
-	ID        string    `json:"id"`
-	At        time.Time `json:"at"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Status    int       `json:"status"`
-	LatencyMS int64     `json:"latency_ms"`
-	Streaming bool      `json:"streaming"`
+	ID               string    `json:"id"`
+	At               time.Time `json:"at"`
+	Provider         string    `json:"provider"`
+	Model            string    `json:"model"`
+	Status           int       `json:"status"`
+	LatencyMS        int64     `json:"latency_ms"`
+	Streaming        bool      `json:"streaming"`
+	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64     `json:"completion_tokens,omitempty"`
+	TotalTokens      int64     `json:"total_tokens,omitempty"`
 }
 
 type adminState struct {
