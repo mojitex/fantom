@@ -285,7 +285,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		upstreamRequest.Header.Set("Accept",accept)
 		upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
 		if provider.config.ID=="opencode-console" {
-			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\\r\\n") {
+			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\r\n") {
 				upstreamRequest.Header.Set("x-opencode-session",session)
 			}
 		}
@@ -331,7 +331,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func shouldFallback(status int) bool {\n\tswitch status { case http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout: return true }; return false\n}\n\nfunc normalizedMode(value string, allowed ...string) string {
+func shouldFallback(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedMode(value string, allowed ...string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	for _, candidate := range allowed {
 		if value == candidate {
