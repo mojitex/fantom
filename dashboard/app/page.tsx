@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 
 type Page = "overview" | "providers" | "models" | "routing" | "keys" | "usage" | "logs" | "settings";
 type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string };
@@ -24,7 +25,7 @@ const nav:{id:Page;label:string;group:string;glyph:string}[]=[
 ];
 
 function Icon({name,size=18}:{name:string;size?:number}) {
- const paths:Record<string,React.ReactNode>={
+ const paths:Record<string,ReactNode>={
   grid:<><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
   layers:<><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></>,
   cpu:<><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></>,
@@ -100,7 +101,7 @@ export default function Home(){
  async function action(fn:()=>Promise<unknown>,success:string){setBusy(true);setError("");setNotice("");try{await fn();setNotice(success);await load();}catch(e){setError(e instanceof Error?e.message:"Operation failed");}finally{setBusy(false);}}
  function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_key:"",models:"*",timeout_seconds:"100"});setShowProviderForm(true);}
  function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_key:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100)});setShowProviderForm(true);}
- async function saveProvider(e:React.FormEvent){e.preventDefault();const body={...providerForm,models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");}
+ async function saveProvider(e:FormEvent){e.preventDefault();const body={...providerForm,models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");}
  async function testProvider(id:string){setBusy(true);setError("");try{const data=await request("/api/admin/providers/"+encodeURIComponent(id)+"/test",{method:"POST",body:"{}"});setNotice(data.ok?"Connection test passed · HTTP "+data.http_status:"Connection test failed · "+(data.error||data.message));}catch(e){setError(e instanceof Error?e.message:"Connection test failed");}finally{setBusy(false);}}
  async function saveRoute(e:React.FormEvent){e.preventDefault();const next={...(snapshot?.routes||{}),[alias]:{provider:routeProvider,upstream_model:upstreamModel}};await action(async()=>{await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});setAlias("");setUpstreamModel("");},"Model alias created");}
  async function removeRoute(name:string){const next={...(snapshot?.routes||{})};delete next[name];await action(()=>request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})}),"Route removed");}
