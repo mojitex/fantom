@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"sync/atomic"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"

@@ -22,6 +22,7 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 - Provider-specific chat paths and model-catalog URLs.
 - Multiple upstream NVIDIA keys, round-robin key selection, pooled HTTP connections, HTTP/2 and incremental SSE forwarding.
 - 100-second default response-header timeout; configurable per provider.
+- Provider model catalogs are cached for 45 seconds, serve the last known-good result during transient failures, and can be invalidated through the admin API.
 - Optional outbound HTTP/HTTPS proxy.
 - Safe command-tool output normalization and optional compact code-mode instructions.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
@@ -81,6 +82,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | GET / POST | `/api/admin/providers` | List or add providers |
 | PUT / DELETE | `/api/admin/providers/{id}` | Update or remove a provider |
 | POST | `/api/admin/providers/{id}/test` | Run a live chat-completions smoke test (also reports model-catalog status) |
+| POST | `/api/admin/models/refresh` | Invalidate cached provider model catalogs |
 | GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
 | DELETE | `/api/admin/keys/{id}` | Revoke a generated key |

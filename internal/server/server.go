@@ -78,7 +78,7 @@ type modelRequest struct {
 
 func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	if logger == nil { logger = slog.Default() }
-	store, err := newAdminStore(cfg)
+	store, err := newAdminStore(cfg, logger)
 	if err != nil {
 		logger.Error("could not initialize persistent admin state", "error", err)
 		store = &adminStore{path:"./data/fantom-state.json", data:adminState{Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode}}
