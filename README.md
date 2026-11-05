@@ -119,13 +119,15 @@ This is conservative output cleanup, not a universal tokenizer compressor. Savin
 
 ### Retry diagnostics
 
-Successful chat responses can include these gateway headers:
+Final chat responses can include these gateway headers (including a gateway error after upstream attempts):
 
 - `X-Fantom-Upstream-Attempts`: total upstream HTTP attempts made for the request.
 - `X-Fantom-Credential-Retries`: additional credentials tried inside a provider key pool.
 - `X-Fantom-Fallback-Attempts`: additional model/provider fallback candidates attempted after the primary candidate.
 
-Credential retries and model fallback attempts are counted separately.
+Credential retries and model fallback attempts are counted separately. The same three counters are stored in each request-history row and shown in the Request Logs table.
+
+Request history is written in coalesced batches rather than synchronously on every inference request. Fantom flushes pending history during graceful shutdown. A hard process or host crash can still lose the most recent unflushed request records (normally up to about one second of traffic).
 
 ## Local development
 
