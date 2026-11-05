@@ -29,7 +29,7 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 
 ## Important scope and compatibility notes
 
-This is a much more capable control plane than the original starter page, but it is not yet a feature-for-feature clone of 9Router or OmniRoute. In particular, this build does **not** yet include OAuth/device-code onboarding, multi-account quota-aware selection, combo/fallback chains, cross-protocol Claude/Gemini/Responses translation, billing/pricing calculations, or provider token-refresh workflows. The request analytics currently records status, provider, model and elapsed time; it does not claim provider-reported token usage when the upstream does not return it.
+Fantom is not yet a feature-for-feature clone of 9Router or OmniRoute. It already supports model aliases/combos, ordered fallback chains, per-provider credential pools, provider-reported token usage and model-catalog caching. It does **not** yet include OAuth/device-code onboarding, quota-aware multi-account selection, native Anthropic/Gemini/OpenAI Responses protocol translation, automatic provider token refresh or price-based billing. Token analytics is based only on usage values returned by the upstream; missing usage is not guessed.
 
 The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode free-tier restrictions are not bypassed; use supported Console/Go API access. Add compatible endpoints from the Providers page.
 
@@ -50,7 +50,7 @@ Credential failover is bounded to the configured key pool for each route candida
    | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
    | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
 
-4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Without a persistent volume, the container filesystem can be reset by a redeploy.
+4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Request-history writes are coalesced for up to about one second and flushed on graceful shutdown, keeping routine log I/O off the inference path. A hard process/host crash can still lose the most recent unflushed request records. Without a persistent volume, the container filesystem can be reset by a redeploy.
 5. Open the generated Railway domain. Sign in with `GATEWAY_API_KEY`.
 
 For a self-hosted Docker deployment, `compose.yaml` creates a named `fantom-data` volume automatically.
@@ -70,7 +70,7 @@ curl https://YOUR-DOMAIN/v1/chat/completions \
   }'
 ```
 
-The same key is accepted by protected `/v1/*` and `/api/admin/*` endpoints. Use generated client keys for applications; reserve the environment key for administration.
+Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` require the environment-level `GATEWAY_API_KEY`; generated client keys cannot administer the gateway.
 
 ## Admin API
 
@@ -82,6 +82,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | GET / POST | `/api/admin/providers` | List or add providers |
 | PUT / DELETE | `/api/admin/providers/{id}` | Update or remove a provider |
 | POST | `/api/admin/providers/{id}/test` | Run a live chat-completions smoke test (also reports model-catalog status) |
+| POST | `/api/admin/models/refresh` | Invalidate provider model-catalog caches |
 | POST | `/api/admin/models/refresh` | Invalidate cached provider model catalogs |
 | GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
@@ -115,6 +116,16 @@ Use `models: ["*"]` to expose all models returned by the provider's model endpoi
 - Per-request headers: `X-Fantom-Token-Saver` and `X-Fantom-Code-Mode`.
 
 This is conservative output cleanup, not a universal tokenizer compressor. Savings vary with tool output and are not guaranteed.
+
+### Retry diagnostics
+
+Successful chat responses can include these gateway headers:
+
+- `X-Fantom-Upstream-Attempts`: total upstream HTTP attempts made for the request.
+- `X-Fantom-Credential-Retries`: additional credentials tried inside a provider key pool.
+- `X-Fantom-Fallback-Attempts`: additional model/provider fallback candidates attempted after the primary candidate.
+
+Credential retries and model fallback attempts are counted separately.
 
 ## Local development
 
