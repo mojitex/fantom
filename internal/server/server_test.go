@@ -249,6 +249,9 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 		auth:=r.Header.Get("Authorization")
 		seen=append(seen,auth)
 		if auth=="Bearer revoked-key" { w.WriteHeader(http.StatusUnauthorized); _,_=io.WriteString(w,`{"error":{"message":"revoked"}}`); return }
+		w.Header().Set("X-Fantom-Upstream-Attempts", "999")
+		w.Header().Set("X-Fantom-Selected-Provider", "spoofed-provider")
+		w.Header().Set("X-Request-ID", "spoofed-request")
 		_,_=io.WriteString(w,`{"id":"key-failover-ok","choices":[]}`)
 	}))
 	defer upstream.Close()
@@ -274,6 +277,15 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 	}
 	if got := res.Header().Get("X-Fantom-Fallback-Attempts"); got != "" {
 		t.Fatalf("credential retries must not be reported as model fallbacks: %q", got)
+	}
+	if values := res.Header().Values("X-Fantom-Upstream-Attempts"); len(values) != 1 || values[0] != "2" {
+		t.Fatalf("upstream must not spoof gateway attempt header: %#v", values)
+	}
+	if got := res.Header().Get("X-Fantom-Selected-Provider"); got != "primary" {
+		t.Fatalf("upstream must not spoof selected provider: %q", got)
+	}
+	if got := res.Header().Get("X-Request-ID"); strings.Contains(got, "spoofed") {
+		t.Fatalf("upstream must not spoof request ID: %q", got)
 	}
 
 	logReq := httptest.NewRequest(http.MethodGet, "/api/admin/logs?limit=1", nil)
