@@ -109,14 +109,14 @@ func credentialCooldown(status int, retryAfter string, now time.Time) time.Durat
 	case http.StatusTooManyRequests:
 		value := strings.TrimSpace(retryAfter)
 		if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
-			duration := time.Duration(seconds) * time.Second
-			if duration > maxCooldown { return maxCooldown }
-			if duration > 0 { return duration }
+			if seconds >= int(maxCooldown/time.Second) { return maxCooldown }
+			return time.Duration(seconds) * time.Second
 		}
 		if parsed, err := http.ParseTime(value); err == nil {
 			duration := parsed.Sub(now)
 			if duration > maxCooldown { return maxCooldown }
-			if duration > 0 { return duration }
+			if duration < 0 { return 0 }
+			return duration
 		}
 		return 30 * time.Second
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired:
