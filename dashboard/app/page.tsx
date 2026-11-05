@@ -97,7 +97,7 @@ export default function Home(){
  },[apiKey,request]);
 
  useEffect(()=>{const saved=sessionStorage.getItem("fantom-admin-key");if(saved){setApiKey(saved);}setBooting(false);},[]);
- useEffect(()=>{if(apiKey&& !authenticated && !booting){void load();}},[apiKey,authenticated,booting,load]);
+ useEffect(()=>{if(apiKey&& !authenticated && !booting && sessionStorage.getItem("fantom-admin-key")===apiKey){void load();}},[apiKey,authenticated,booting,load]);
 
  async function action(fn:()=>Promise<unknown>,success:string){setBusy(true);setError("");setNotice("");try{await fn();setNotice(success);await load();}catch(e){setError(e instanceof Error?e.message:"Operation failed");}finally{setBusy(false);}}
  function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_key:"",models:"*",timeout_seconds:"100"});setShowProviderForm(true);}
@@ -146,7 +146,7 @@ export default function Home(){
  </div>;
 }
 
-function pageTitle(p:Page){return ({overview:"Command center",providers:"Provider connections",models:"Model catalog",routing:"Routing & aliases",keys:"API credentials",usage:"Usage intelligence",logs:"Request observability",settings:"Gateway settings"} as Record<Page,string>)[p]}
+function pageTitle(p:Page){return ({overview:"Command center",providers:"Provider connections",models:"Model catalog",routing:"Routes & failover",keys:"API credentials",usage:"Usage intelligence",logs:"Request observability",settings:"Gateway settings"} as Record<Page,string>)[p]}
 function pageDescription(p:Page){return ({overview:"A live view of your AI infrastructure, traffic and model availability.",providers:"Connect upstreams, rotate credentials and verify provider health.",models:"A unified catalog of the models currently exposed through Fantom.",routing:"Give clients stable model names and direct each alias to its upstream.",keys:"Issue dedicated client credentials and revoke access without redeploying.",usage:"Understand traffic patterns, latency and provider distribution.",logs:"Inspect recent routed requests and diagnose provider behavior.",settings:"Configure default routing and gateway-wide optimization behavior."} as Record<Page,string>)[p]}
 
 function Overview({snapshot,models,onNavigate}:{snapshot:Snapshot|null;models:Model[];onNavigate:(p:Page)=>void}){
