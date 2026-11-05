@@ -54,15 +54,21 @@ func (p *providerRuntime) apiKeysForRequest() []string {
 	defer p.keyMu.Unlock()
 
 	ordered := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
 	for offset := 0; offset < len(keys); offset++ {
 		index := (start + offset) % len(keys)
+		key := keys[index]
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		if index >= len(p.keyCooldowns) {
 			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
 		}
 		until := p.keyCooldowns[index]
 		if until.IsZero() || !now.Before(until) {
 			p.keyCooldowns[index] = time.Time{}
-			ordered = append(ordered, keys[index])
+			ordered = append(ordered, key)
 		}
 	}
 	// Returning no credentials lets routing advance to another provider instead
