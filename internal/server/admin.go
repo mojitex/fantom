@@ -114,7 +114,7 @@ func providerViews(items []persistedProvider) []map[string]any {
 	out:=make([]map[string]any,0,len(items))
 	for _,p:=range sortedProviders(items) {
 		preview:=""; if len(p.APIKeys)>0 { last:=p.APIKeys[0]; if len(last)>4 { preview="••••"+last[len(last)-4:] } else { preview="••••" } }
-		out=append(out,map[string]any{"id":p.ID,"base_url":p.BaseURL,"chat_path":p.ChatPath,"models_url":p.ModelsURL,"auth_type":p.AuthType,"models":p.Models,"timeout_seconds":p.TimeoutSeconds,"has_api_key":len(p.APIKeys)>0,"api_key_preview":preview,"model_count":len(p.Models)})
+		out=append(out,map[string]any{"id":p.ID,"base_url":p.BaseURL,"chat_path":p.ChatPath,"models_url":p.ModelsURL,"auth_type":p.AuthType,"models":p.Models,"timeout_seconds":p.TimeoutSeconds,"has_api_key":len(p.APIKeys)>0,"api_key_preview":preview,"key_count":len(p.APIKeys),"model_count":len(p.Models)})
 	}
 	return out
 }
