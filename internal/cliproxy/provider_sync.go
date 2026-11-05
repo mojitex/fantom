@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	fantomconfig "github.com/mojitex/fantom/internal/config"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -58,7 +57,7 @@ func compatibilityForProvider(provider fantomconfig.Provider) (sdkconfig.OpenAIC
 	headers := make(map[string]string, len(provider.Headers))
 	for name, value := range provider.Headers {
 		name = strings.TrimSpace(name)
-		if name != "" {
+		if name != "" && !strings.EqualFold(name, "Authorization") {
 			headers[name] = value
 		}
 	}

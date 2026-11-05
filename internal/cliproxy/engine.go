@@ -239,6 +239,13 @@ func (e *Engine) Start(parent context.Context) error {
 			if doErr == nil {
 				_ = response.Body.Close()
 				if response.StatusCode >= 200 && response.StatusCode < 300 {
+					// The service starts its config watcher just after the HTTP listener.
+					// Let it attach before Fantom writes mirrored provider configuration.
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(250 * time.Millisecond):
+					}
 					return nil
 				}
 			}
