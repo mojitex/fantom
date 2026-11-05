@@ -15,6 +15,8 @@ services:
       CONFIG_FILE: /app/configs/providers.json
       STATIC_DIR: /app/dashboard
       FANTOM_DATA_DIR: /data
+      FANTOM_PUBLIC_URL: ${FANTOM_PUBLIC_URL:-}
+      FANTOM_ROUTER_INTERNAL_KEY: ${FANTOM_ROUTER_INTERNAL_KEY:-}
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       NVIDIA_API_KEYS: ${NVIDIA_API_KEYS:-}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}

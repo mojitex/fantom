@@ -6,9 +6,10 @@ RUN npm install --no-audit --no-fund
 COPY dashboard/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS gateway-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS gateway-builder
 WORKDIR /src
 COPY go.mod ./
+RUN go mod download
 COPY . .
 COPY --from=dashboard-builder /dashboard/out ./dashboard/out
 ARG TARGETOS

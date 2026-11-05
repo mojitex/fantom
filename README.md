@@ -1,6 +1,6 @@
 # Fantom — AI Routing Control Plane
 
-Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js control-plane dashboard. The dashboard and API ship together in one multi-architecture Docker image.
+Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go provider/OAuth/protocol runtime, and a TypeScript/Next.js control-plane dashboard. The dashboard and runtime ship together in one multi-architecture Docker image.
 
 **Image:** `monsmain/fantom:latest`  
 **Repository:** https://github.com/mojitex/fantom
@@ -27,9 +27,17 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 - Safe command-tool output normalization and optional compact code-mode instructions.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
 
+### Embedded Go routing engine
+
+Fantom now embeds the MIT-licensed [CLIProxyAPI Go SDK](https://github.com/router-for-me/CLIProxyAPI) as an in-process service with a private loopback listener. Fantom remains the public gateway: it validates application keys before proxying inference traffic, while the embedded engine owns provider executors, OAuth credential files, token refresh, account selection, protocol compatibility and native streaming.
+
+The embedded runtime exposes its management API through Fantom at `/v0/management/*` and its advanced control panel at `/management.html`. These paths require the environment-level `GATEWAY_API_KEY`. OAuth callbacks are forwarded through the public Fantom listener. OAuth state and the embedded runtime configuration are stored under `FANTOM_DATA_DIR/cli-proxy`; attach a persistent volume to retain accounts across restarts.
+
+The two routing planes are intentionally staged: models already owned by Fantom's configured providers and explicit aliases continue through Fantom's existing provider path; models discovered from OAuth/account-backed providers are delegated to the embedded runtime. This avoids silently breaking existing NVIDIA NIM and OpenCode configurations while the provider-management UI is migrated.
+
 ## Important scope and compatibility notes
 
-Fantom is not yet a feature-for-feature clone of 9Router or OmniRoute. It already supports model aliases/combos, ordered fallback chains, per-provider credential pools, provider-reported token usage and model-catalog caching. It does **not** yet include OAuth/device-code onboarding, quota-aware multi-account selection, native Anthropic/Gemini/OpenAI Responses protocol translation, automatic provider token refresh or price-based billing. Token analytics is based only on usage values returned by the upstream; missing usage is not guessed.
+The embedded Go engine provides OAuth-backed provider execution, credential refresh, account selection and native OpenAI/Anthropic/Gemini-compatible API surfaces. Fantom's own TypeScript dashboard and its provider/usage control APIs are being migrated in stages; some advanced controls are currently available through the proxied `/v0/management/*` API and `/management.html` panel rather than the primary Fantom dashboard. Do not treat the existing legacy Usage page as a complete cross-runtime cost ledger yet.
 
 The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode free-tier restrictions are not bypassed; use supported Console/Go API access. Add compatible endpoints from the Providers page.
 
@@ -47,10 +55,12 @@ Credential failover is bounded to the configured key pool for each route candida
    | `NVIDIA_API_KEY` | Optional | NVIDIA NIM upstream credential |
    | `OPENCODE_API_KEY` | Optional | OpenCode Console upstream credential |
    | `FANTOM_DATA_DIR` | Recommended | Set to `/data` |
+   | `FANTOM_PUBLIC_URL` | Recommended for OAuth | Public Fantom URL, including `https://` |
+   | `FANTOM_ROUTER_INTERNAL_KEY` | Optional | Fixed private key for the loopback-only embedded runtime; leave empty for a derived key |
    | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
    | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
 
-4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Request-history writes are coalesced for up to about one second and flushed on graceful shutdown, keeping routine log I/O off the inference path. A hard process/host crash can still lose the most recent unflushed request records. Without a persistent volume, the container filesystem can be reset by a redeploy.
+4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves legacy providers, embedded OAuth credentials, router configuration, secrets, aliases, generated key hashes and request logs across redeploys. Request-history writes are coalesced for up to about one second and flushed on graceful shutdown, keeping routine log I/O off the inference path. A hard process/host crash can still lose the most recent unflushed request records. Without a persistent volume, the container filesystem can be reset by a redeploy.
 5. Open the generated Railway domain. Sign in with `GATEWAY_API_KEY`.
 
 For a self-hosted Docker deployment, `compose.yaml` creates a named `fantom-data` volume automatically.
@@ -70,7 +80,7 @@ curl https://YOUR-DOMAIN/v1/chat/completions \
   }'
 ```
 
-Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` require the environment-level `GATEWAY_API_KEY`; generated client keys cannot administer the gateway.
+Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*`, the embedded `/v0/management/*` API and `/management.html` require the environment-level `GATEWAY_API_KEY`; generated client keys cannot administer the gateway.
 
 ## Admin API
 
