@@ -575,11 +575,19 @@ func captureProviderUsage(body []byte, contentType string, record *requestRecord
 
 func copyResponseHeaders(dst, src http.Header) {
 	for name, values := range src {
-		switch strings.ToLower(name) {
+		lowerName := strings.ToLower(name)
+		// These headers belong to the gateway. Never let an upstream inject
+		// duplicate or misleading routing, retry, or request-correlation data.
+		if lowerName == "x-request-id" || strings.HasPrefix(lowerName, "x-fantom-") {
+			continue
+		}
+		switch lowerName {
 		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length":
 			continue
 		}
-		for _, value := range values { dst.Add(name, value) }
+		for _, value := range values {
+			dst.Add(name, value)
+		}
 	}
 }
 
