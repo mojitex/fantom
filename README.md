@@ -10,10 +10,10 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 ### Control plane
 - A multi-page dark operations dashboard: Command Center, Providers, Model Catalog, Routing & Aliases, API Keys, Usage, Request Logs and Settings.
 - Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
-- Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider and are selected round-robin for upstream calls.
-- Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases retry on authentication, rate-limit, timeout and transient 5xx responses.
+- Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider; requests rotate through the pool and retry another credential after authentication, rate-limit and transient upstream failures.
+- Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases are attempted only for classified transient/authentication/billing responses.
 - Generate and revoke client API keys. Generated keys are only displayed once and stored as SHA-256 hashes.
-- Request history and basic provider/model/latency aggregates (last 5,000 requests).
+- Request history and provider/model/latency aggregates (last 5,000 requests), including provider-reported prompt/completion/total tokens when returned by the upstream (JSON and SSE).
 - Default provider, token saver and code-mode settings are stored persistently.
 
 ### Gateway runtime
@@ -31,6 +31,8 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 This is a much more capable control plane than the original starter page, but it is not yet a feature-for-feature clone of 9Router or OmniRoute. In particular, this build does **not** yet include OAuth/device-code onboarding, multi-account quota-aware selection, combo/fallback chains, cross-protocol Claude/Gemini/Responses translation, billing/pricing calculations, or provider token-refresh workflows. The request analytics currently records status, provider, model and elapsed time; it does not claim provider-reported token usage when the upstream does not return it.
 
 The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode free-tier restrictions are not bypassed; use supported Console/Go API access. Add compatible endpoints from the Providers page.
+
+Credential failover is bounded to the configured key pool for each route candidate. Token analytics reports only usage returned by the upstream; providers that omit usage are recorded without fabricated token or cost figures. Monetary cost calculation, OAuth refresh, quota-aware account scheduling and cross-protocol translation remain separate work and are not claimed by this release.
 
 ## Deploy on Railway
 
@@ -78,7 +80,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | GET | `/api/admin/bootstrap` | Dashboard data and overview |
 | GET / POST | `/api/admin/providers` | List or add providers |
 | PUT / DELETE | `/api/admin/providers/{id}` | Update or remove a provider |
-| POST | `/api/admin/providers/{id}/test` | Test provider model-catalog connectivity |
+| POST | `/api/admin/providers/{id}/test` | Run a live chat-completions smoke test (also reports model-catalog status) |
 | GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
 | DELETE | `/api/admin/keys/{id}` | Revoke a generated key |

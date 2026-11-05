@@ -233,3 +233,106 @@ func TestFallbackEligibleStatuses(t *testing.T) {
 		if shouldFallback(status) { t.Errorf("status %d should not allow fallback",status) }
 	}
 }
+
+
+// A rejected credential must not prevent another credential in the same provider
+// pool from serving the request.
+func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR",t.TempDir())
+	var seen []string
+	upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+		auth:=r.Header.Get("Authorization")
+		seen=append(seen,auth)
+		if auth=="Bearer revoked-key" { w.WriteHeader(http.StatusUnauthorized); _,_=io.WriteString(w,`{"error":{"message":"revoked"}}`); return }
+		_,_=io.WriteString(w,`{"id":"key-failover-ok","choices":[]}`)
+	}))
+	defer upstream.Close()
+	cfg:=&config.Config{
+		DefaultProvider:"primary",GatewayAPIKeys:[]string{"gateway-secret"},MaxRequestBytes:1<<20,
+		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"revoked-key","healthy-key"},Models:[]string{"test-model"},TimeoutSeconds:5}},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	req:=httptest.NewRequest(http.MethodPost,"/v1/chat/completions",strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization","Bearer gateway-secret")
+	res:=httptest.NewRecorder()
+	handler.ServeHTTP(res,req)
+	if res.Code!=http.StatusOK { t.Fatalf("response = %d: %s",res.Code,res.Body.String()) }
+	if len(seen)!=2 || seen[0]!="Bearer revoked-key" || seen[1]!="Bearer healthy-key" {
+		t.Fatalf("credential retry order = %#v",seen)
+	}
+	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" {
+		t.Fatalf("credential retry attempts header = %q",res.Header().Get("X-Fantom-Fallback-Attempts"))
+	}
+}
+
+func TestCaptureProviderUsageFromJSONAndSSE(t *testing.T) {
+	jsonRecord:=requestRecord{}
+	captureProviderUsage([]byte(`{"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`),"application/json",&jsonRecord)
+	if jsonRecord.PromptTokens!=12 || jsonRecord.CompletionTokens!=7 || jsonRecord.TotalTokens!=19 {
+		t.Fatalf("JSON usage was not captured: %+v",jsonRecord)
+	}
+	sseRecord:=requestRecord{}
+	sse:=[]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":20}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n")
+	captureProviderUsage(sse,"text/event-stream",&sseRecord)
+	if sseRecord.PromptTokens!=20 || sseRecord.CompletionTokens!=9 || sseRecord.TotalTokens!=29 {
+		t.Fatalf("SSE usage was not captured: %+v",sseRecord)
+	}
+}
+
+func TestProviderTestRequiresChatCompletionNotJustModelsEndpoint(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR",t.TempDir())
+	upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_,_=io.WriteString(w,`{"data":[{"id":"smoke-model"}]}`)
+		case "/v1/chat/completions":
+			_,_=io.WriteString(w,`{"id":"smoke-ok","choices":[{"message":{"content":"OK"}}]}`)
+		default: http.NotFound(w,r)
+		}
+	}))
+	defer upstream.Close()
+	cfg:=&config.Config{
+		DefaultProvider:"primary",GatewayAPIKeys:[]string{"admin-secret"},MaxRequestBytes:1<<20,
+		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"none",Models:[]string{"*"},TimeoutSeconds:5}},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	req:=httptest.NewRequest(http.MethodPost,"/api/admin/providers/primary/test",strings.NewReader("{}"))
+	req.Header.Set("Authorization","Bearer admin-secret")
+	res:=httptest.NewRecorder()
+	handler.ServeHTTP(res,req)
+	if res.Code!=http.StatusOK { t.Fatalf("test endpoint = %d: %s",res.Code,res.Body.String()) }
+	if !strings.Contains(res.Body.String(),`"chat_ok":true`) || !strings.Contains(res.Body.String(),`"test_model":"smoke-model"`) {
+		t.Fatalf("provider smoke test did not verify chat completion: %s",res.Body.String())
+	}
+}
+
+
+func TestModelCatalogIsCachedAndCanBeInvalidated(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR",t.TempDir())
+	var catalogCalls atomic.Int32
+	upstream:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+		if r.URL.Path!="/v1/models" { http.NotFound(w,r); return }
+		catalogCalls.Add(1)
+		_,_=io.WriteString(w,`{"data":[{"id":"cached-model"}]}`)
+	}))
+	defer upstream.Close()
+	cfg:=&config.Config{
+		DefaultProvider:"primary",GatewayAPIKeys:[]string{"admin-secret"},MaxRequestBytes:1<<20,
+		Providers:[]config.Provider{{ID:"primary",BaseURL:upstream.URL+"/v1",AuthType:"none",Models:[]string{"*"},TimeoutSeconds:5}},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	call:=func(method,path string)*httptest.ResponseRecorder{
+		req:=httptest.NewRequest(method,path,nil)
+		req.Header.Set("Authorization","Bearer admin-secret")
+		res:=httptest.NewRecorder(); handler.ServeHTTP(res,req); return res
+	}
+	for i:=0;i<2;i++ {
+		res:=call(http.MethodGet,"/v1/models")
+		if res.Code!=http.StatusOK || !strings.Contains(res.Body.String(),"cached-model") { t.Fatalf("model list %d = %d: %s",i,res.Code,res.Body.String()) }
+	}
+	if got:=catalogCalls.Load();got!=1 { t.Fatalf("catalog endpoint called %d times before expiry, want 1",got) }
+	refresh:=call(http.MethodPost,"/api/admin/models/refresh")
+	if refresh.Code!=http.StatusOK { t.Fatalf("catalog refresh = %d: %s",refresh.Code,refresh.Body.String()) }
+	_ = call(http.MethodGet,"/v1/models")
+	if got:=catalogCalls.Load();got!=2 { t.Fatalf("catalog endpoint called %d times after refresh, want 2",got) }
+}
