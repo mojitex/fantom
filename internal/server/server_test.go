@@ -471,3 +471,13 @@ func TestChatReturnsRetryAfterWhenEveryCredentialIsCoolingDown(t *testing.T) {
 		t.Fatalf("upstream was called %d times, want only once during the cooldown window", got)
 	}
 }
+
+
+func TestProviderCooldownMarksDuplicateConfiguredKeys(t *testing.T) {
+	provider := &providerRuntime{config: config.Provider{APIKeys: []string{"same-key", "same-key", "healthy-key"}}}
+	provider.cooldownCredential("same-key", http.StatusUnauthorized, "")
+	got := provider.apiKeysForRequest()
+	if len(got) != 1 || got[0] != "healthy-key" {
+		t.Fatalf("duplicate credential entries were not cooled together: %#v", got)
+	}
+}
