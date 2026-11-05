@@ -170,3 +170,48 @@ func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
 	removed := call(http.MethodDelete, "/api/admin/providers/custom-openai", "", "admin-secret")
 	if removed.Code != http.StatusOK { t.Fatalf("provider delete = %d: %s", removed.Code, removed.Body.String()) }
 }
+
+
+func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { t.Errorf("decode primary request: %v", err) }
+		if payload["model"] != "primary-model" { t.Errorf("primary model = %#v", payload["model"]) }
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { t.Errorf("decode fallback request: %v", err) }
+		if payload["model"] != "backup-model" { t.Errorf("fallback model = %#v", payload["model"]) }
+		_, _ = io.WriteString(w, `{"id":"fallback-success","choices":[]}`)
+	}))
+	defer fallback.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+		Providers: []config.Provider{
+			{ID:"primary",BaseURL:primary.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"primary-key"},Models:[]string{"primary-model"},TimeoutSeconds:5},
+			{ID:"backup",BaseURL:fallback.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"backup-key"},Models:[]string{"backup-model"},TimeoutSeconds:5},
+		},
+		Routes: map[string]config.Route{
+			"frontdoor": {Provider:"primary",UpstreamModel:"primary-model",FallbackModels:[]string{"backup"}},
+			"backup": {Provider:"backup",UpstreamModel:"backup-model"},
+		},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	req:=httptest.NewRequest(http.MethodPost,"/v1/chat/completions",strings.NewReader(`{"model":"frontdoor","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization","Bearer gateway-secret")
+	res:=httptest.NewRecorder()
+	handler.ServeHTTP(res,req)
+	if res.Code!=http.StatusOK { t.Fatalf("fallback response = %d: %s",res.Code,res.Body.String()) }
+	if !strings.Contains(res.Body.String(),"fallback-success") { t.Fatalf("fallback response body = %s",res.Body.String()) }
+	if res.Header().Get("X-Fantom-Selected-Provider")!="backup" { t.Fatalf("selected provider = %q",res.Header().Get("X-Fantom-Selected-Provider")) }
+	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" { t.Fatalf("fallback attempts = %q",res.Header().Get("X-Fantom-Fallback-Attempts")) }
+}
