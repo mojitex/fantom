@@ -172,3 +172,73 @@ func TestProtocolComboDoesNotFallbackOnNonRetryableValidationError(t *testing.T)
 		t.Fatalf("upstream attempts = %d, want 1", calls)
 	}
 }
+
+
+func TestNativeProtocolCredentialHeadersAreAcceptedAndNeverForwarded(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	type observed struct {
+		authorization string
+		apiKey        string
+		googleKey     string
+		queryKey      string
+	}
+	var got observed
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = observed{
+			authorization: r.Header.Get("Authorization"),
+			apiKey: r.Header.Get("X-API-Key"),
+			googleKey: r.Header.Get("X-Goog-API-Key"),
+			queryKey: r.URL.Query().Get("key"),
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+	cfg := &config.Config{
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+	handler.AttachCore(&protocolTestCore{handler: upstream})
+
+	cases := []struct {
+		name string
+		path string
+		header string
+	}{
+		{name: "anthropic x-api-key", path: "/v1/messages", header: "X-API-Key"},
+		{name: "gemini x-goog-api-key", path: "/v1beta/models", header: "X-Goog-API-Key"},
+		{name: "openai bearer", path: "/v1/test", header: "Authorization"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			switch tc.header {
+			case "Authorization":
+				request.Header.Set("Authorization", "Bearer gateway-secret")
+			default:
+				request.Header.Set(tc.header, "gateway-secret")
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("response = %d: %s", response.Code, response.Body.String())
+			}
+			if got.authorization != "" || got.apiKey != "" || got.googleKey != "" {
+				t.Fatalf("client key header leaked to embedded runtime: %+v", got)
+			}
+		})
+	}
+
+	queryRequest := httptest.NewRequest(http.MethodGet, "/v1beta/models?key=gateway-secret", nil)
+	queryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(queryResponse, queryRequest)
+	if queryResponse.Code != http.StatusOK {
+		t.Fatalf("query key response = %d: %s", queryResponse.Code, queryResponse.Body.String())
+	}
+	if got.queryKey != "" {
+		t.Fatalf("Gemini query key leaked to embedded runtime: %q", got.queryKey)
+	}
+}
