@@ -155,6 +155,9 @@ func New(adminKey string) (*Engine, error) {
 	if err := sdkconfig.SaveConfigPreserveComments(configPath, cfg); err != nil {
 		return nil, fmt.Errorf("persist CLIProxyAPI runtime settings: %w", err)
 	}
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		return nil, fmt.Errorf("secure CLIProxyAPI configuration file: %w", err)
+	}
 
 	service, err := cliproxy.NewBuilder().
 		WithConfig(cfg).

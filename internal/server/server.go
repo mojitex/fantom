@@ -191,8 +191,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	mux.HandleFunc("/management.html", s.handleCoreManagement)
 	for _, callback := range []string{
 		"/anthropic/callback", "/codex/callback", "/antigravity/callback",
-		"/devin/callback", "/kimi/callback", "/kimi-ai/callback",
-		"/xai/callback", "/meta/callback",
+		"/callback", "/devin/callback",
 	} {
 		mux.HandleFunc(callback, s.handleCoreCallback)
 	}

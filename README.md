@@ -31,7 +31,7 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 
 Fantom now embeds the MIT-licensed [CLIProxyAPI Go SDK](https://github.com/router-for-me/CLIProxyAPI) as an in-process service with a private loopback listener. Fantom remains the public gateway: it validates application keys before proxying inference traffic, while the embedded engine owns provider executors, OAuth credential files, token refresh, account selection, protocol compatibility and native streaming.
 
-The embedded runtime exposes its management API through Fantom at `/v0/management/*` and its advanced control panel at `/management.html`. The control-panel page is reachable so it can render its login form; management operations require the environment-level `GATEWAY_API_KEY`. A direct link is available as **Router Console** in the TypeScript dashboard. OAuth callbacks are forwarded through the public Fantom listener. OAuth state and the embedded runtime configuration are stored under `FANTOM_DATA_DIR/cli-proxy`; attach a persistent volume to retain accounts across restarts.
+The embedded runtime exposes its management API through Fantom at `/v0/management/*` and its advanced control panel at `/management.html`. The control-panel page is reachable so it can render its login form; management operations require the environment-level `GATEWAY_API_KEY`. A direct link is available as **Router Console** in the TypeScript dashboard. Fantom exposes the SDK callback endpoints through its public listener, but the upstream SDK still uses provider-specific loopback callback ports for some browser OAuth flows. Hosted OAuth for those providers is not claimed production-ready until those redirects are validated end to end; device-code flows are not affected by this loopback limitation. OAuth state and the embedded runtime configuration are stored under `FANTOM_DATA_DIR/cli-proxy`; attach a persistent volume to retain accounts across restarts.
 
 The two routing planes are intentionally staged: models already owned by Fantom's configured providers and explicit aliases continue through Fantom's existing provider path; models discovered from OAuth/account-backed providers are delegated to the embedded runtime. This avoids silently breaking existing NVIDIA NIM and OpenCode configurations while the provider-management UI is migrated.
 
@@ -55,7 +55,7 @@ Credential failover is bounded to the configured key pool for each route candida
    | `NVIDIA_API_KEY` | Optional | NVIDIA NIM upstream credential |
    | `OPENCODE_API_KEY` | Optional | OpenCode Console upstream credential |
    | `FANTOM_DATA_DIR` | Recommended | Set to `/data` |
-   | `FANTOM_PUBLIC_URL` | Recommended for OAuth | Public Fantom URL, including `https://` |
+   | `FANTOM_PUBLIC_URL` | Optional | Public management base URL, including `https://`; it does not replace provider-specific loopback OAuth callbacks |
    | `FANTOM_ROUTER_INTERNAL_KEY` | Optional | Fixed private key for the loopback-only embedded runtime; leave empty for a derived key |
    | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
    | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
