@@ -275,6 +275,24 @@ func TestChatRetriesNextProviderCredentialAfterUnauthorized(t *testing.T) {
 	if got := res.Header().Get("X-Fantom-Fallback-Attempts"); got != "" {
 		t.Fatalf("credential retries must not be reported as model fallbacks: %q", got)
 	}
+
+	logReq := httptest.NewRequest(http.MethodGet, "/api/admin/logs?limit=1", nil)
+	logReq.Header.Set("Authorization", "Bearer gateway-secret")
+	logResponse := httptest.NewRecorder()
+	handler.ServeHTTP(logResponse, logReq)
+	var history struct {
+		Requests []requestRecord `json:"requests"`
+	}
+	if err := json.Unmarshal(logResponse.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Requests) != 1 {
+		t.Fatalf("request history length = %d, want 1", len(history.Requests))
+	}
+	row := history.Requests[0]
+	if row.UpstreamAttempts != 2 || row.CredentialRetries != 1 || row.FallbackAttempts != 0 {
+		t.Fatalf("incorrect retry diagnostics persisted: %+v", row)
+	}
 }
 
 func TestCaptureProviderUsageFromJSONAndSSE(t *testing.T) {
