@@ -38,6 +38,7 @@ type Server struct {
 	providers   map[string]*providerRuntime
 	store       *adminStore
 	logger      *slog.Logger
+	handler     http.Handler
 	requestID   atomic.Uint64
 }
 
@@ -57,9 +58,9 @@ type modelRequest struct {
 	Model string `json:"model"`
 }
 
-func New(cfg *config.Config, logger *slog.Logger) http.Handler {
+func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if logger == nil { logger = slog.Default() }
-	store, err := newAdminStore(cfg)
+	store, err := newAdminStore(cfg, logger)
 	if err != nil {
 		logger.Error("could not initialize persistent admin state", "error", err)
 		store = &adminStore{path:"./data/fantom-state.json", data:adminState{Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode}}
@@ -73,7 +74,18 @@ func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
 	mux.HandleFunc("/", s.handleDashboard)
-	return s.withRequestID(mux)
+	s.handler = s.withRequestID(mux)
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) Close() {
+	if s.store != nil {
+		s.store.Close()
+	}
 }
 
 func newProviderRuntime(provider config.Provider) *providerRuntime {
@@ -256,59 +268,118 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	var selectedProvider *providerRuntime
 	attempts:=0
-	for candidateIndex,candidateModel:=range candidates {
-		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
-		if resolveErr!=nil { lastErr=resolveErr; continue }
-		provider:=s.providerByID(target.ProviderID)
-		record.Provider=target.ProviderID
-		if provider==nil { lastErr=fmt.Errorf("provider %q is not available",target.ProviderID); continue }
-		key:=provider.apiKey()
-		if provider.config.AuthType=="bearer"&&key=="" { lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID); continue }
-
-		attemptPayload:=make(map[string]json.RawMessage,len(payload))
-		for name,value:=range payload { attemptPayload[name]=value }
-		modelJSON,_:=json.Marshal(target.UpstreamModel)
-		attemptPayload["model"]=modelJSON
-		attemptBody,marshalErr:=json.Marshal(attemptPayload)
-		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
-		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
-		if optimizationStats.ToolResultsChanged>0 {
-			w.Header().Set("X-Fantom-Tool-Results-Optimized",fmt.Sprint(optimizationStats.ToolResultsChanged))
-			w.Header().Set("X-Fantom-Bytes-Saved",fmt.Sprint(optimizationStats.SavedBytes()))
-			w.Header().Set("X-Fantom-Estimated-Tokens-Saved",fmt.Sprint(optimizationStats.SavedBytes()/4))
+	fallbackAttempts := 0
+	for candidateIndex, candidateModel := range candidates {
+		if candidateIndex > 0 {
+			fallbackAttempts = candidateIndex
+		}
+		target, resolveErr := routing.Resolve(candidateModel, state.Routes, state.DefaultProvider, providerMap)
+		if resolveErr != nil {
+			lastErr = resolveErr
+			continue
+		}
+		provider := s.providerByID(target.ProviderID)
+		record.Provider = target.ProviderID
+		if provider == nil {
+			lastErr = fmt.Errorf("provider %q is not available", target.ProviderID)
+			continue
 		}
 
-		upstreamRequest,requestErr:=http.NewRequestWithContext(r.Context(),http.MethodPost,provider.config.BaseURL+provider.config.ChatPath,bytes.NewReader(attemptBody))
-		if requestErr!=nil { lastErr=requestErr; continue }
-		upstreamRequest.Header.Set("Content-Type","application/json")
-		accept:=strings.TrimSpace(r.Header.Get("Accept")); if accept=="" { accept="application/json" }
-		upstreamRequest.Header.Set("Accept",accept)
-		upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
-		if provider.config.ID=="opencode-console" {
-			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\r\n") {
-				upstreamRequest.Header.Set("x-opencode-session",session)
+		keyAttempts := 1
+		if provider.config.AuthType == "bearer" {
+			keyAttempts = len(provider.config.APIKeys)
+			if keyAttempts == 0 {
+				lastErr = fmt.Errorf("provider %q has no configured API key", target.ProviderID)
+				continue
+			}
+			if keyAttempts > 3 {
+				keyAttempts = 3
 			}
 		}
-		s.applyProviderHeaders(upstreamRequest,provider,key)
-		attempts++
-		response,requestErr=provider.client.Do(upstreamRequest)
-		if requestErr!=nil {
-			if r.Context().Err()!=nil { return }
-			lastErr=requestErr
-			s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
-			response=nil
-			continue
+
+		attemptPayload := make(map[string]json.RawMessage, len(payload))
+		for name, value := range payload {
+			attemptPayload[name] = value
 		}
-		if shouldFallback(response.StatusCode)&&candidateIndex<len(candidates)-1 {
-			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
-			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
-			_ = response.Body.Close()
-			response=nil
-			continue
+		modelJSON, _ := json.Marshal(target.UpstreamModel)
+		attemptPayload["model"] = modelJSON
+		attemptBody, marshalErr := json.Marshal(attemptPayload)
+		if marshalErr != nil {
+			writeAPIError(w, http.StatusBadRequest, "could not encode routed request", "invalid_request_error")
+			return
 		}
-		selectedProvider=provider
-		record.Provider=provider.config.ID
-		break
+		attemptBody, optimizationStats := optimizer.Apply(attemptBody, saverMode, codeMode)
+		if optimizationStats.ToolResultsChanged > 0 {
+			w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
+			w.Header().Set("X-Fantom-Bytes-Saved", fmt.Sprint(optimizationStats.SavedBytes()))
+			w.Header().Set("X-Fantom-Estimated-Tokens-Saved", fmt.Sprint(optimizationStats.SavedBytes()/4))
+		}
+
+		for keyAttempt := 0; keyAttempt < keyAttempts; keyAttempt++ {
+			key := ""
+			if provider.config.AuthType == "bearer" {
+				key = provider.apiKey()
+				if key == "" {
+					lastErr = fmt.Errorf("provider %q has no configured API key", target.ProviderID)
+					break
+				}
+			}
+
+			upstreamRequest, requestErr := http.NewRequestWithContext(r.Context(), http.MethodPost, provider.config.BaseURL+provider.config.ChatPath, bytes.NewReader(attemptBody))
+			if requestErr != nil {
+				lastErr = requestErr
+				break
+			}
+			upstreamRequest.Header.Set("Content-Type", "application/json")
+			accept := strings.TrimSpace(r.Header.Get("Accept"))
+			if accept == "" {
+				accept = "application/json"
+			}
+			upstreamRequest.Header.Set("Accept", accept)
+			upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
+			if provider.config.ID == "opencode-console" {
+				if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
+					upstreamRequest.Header.Set("x-opencode-session", session)
+				}
+			}
+			s.applyProviderHeaders(upstreamRequest, provider, key)
+			attempts++
+			response, requestErr = provider.client.Do(upstreamRequest)
+			if requestErr != nil {
+				if r.Context().Err() != nil {
+					return
+				}
+				lastErr = requestErr
+				s.logger.Warn("upstream request failed", "provider", provider.config.ID, "model", candidateModel, "error", requestErr, "attempt", attempts, "key_attempt", keyAttempt+1)
+				response = nil
+				if keyAttempt+1 < keyAttempts {
+					continue
+				}
+				break
+			}
+
+			if shouldFallback(response.StatusCode) && keyAttempt+1 < keyAttempts {
+				lastErr = fmt.Errorf("provider %s returned HTTP %d", provider.config.ID, response.StatusCode)
+				s.logger.Warn("upstream key rejected or throttled; trying another key", "provider", provider.config.ID, "model", candidateModel, "status", response.StatusCode, "key_attempt", keyAttempt+1)
+				_ = response.Body.Close()
+				response = nil
+				continue
+			}
+			if shouldFallback(response.StatusCode) && candidateIndex < len(candidates)-1 {
+				lastErr = fmt.Errorf("provider %s returned HTTP %d", provider.config.ID, response.StatusCode)
+				s.logger.Warn("upstream returned fallback-eligible status", "provider", provider.config.ID, "model", candidateModel, "status", response.StatusCode)
+				_ = response.Body.Close()
+				response = nil
+				break
+			}
+
+			selectedProvider = provider
+			record.Provider = provider.config.ID
+			break
+		}
+		if response != nil {
+			break
+		}
 	}
 	if response==nil {
 		message:="no configured route could serve this model"
@@ -321,10 +392,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if selectedProvider!=nil {
 		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
 	}
-	if attempts>1 { w.Header().Set("X-Fantom-Fallback-Attempts",fmt.Sprint(attempts-1)) }
-	copyResponseHeaders(w.Header(),response.Header)
+	if attempts > 1 {
+		w.Header().Set("X-Fantom-Upstream-Attempts", fmt.Sprint(attempts))
+	}
+	if fallbackAttempts > 0 {
+		w.Header().Set("X-Fantom-Fallback-Attempts", fmt.Sprint(fallbackAttempts))
+	}
+	copyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	s.streamBody(w,response.Body)
+	usage := s.streamBody(w, response.Body)
+	record.PromptTokens = usage.PromptTokens
+	record.CompletionTokens = usage.CompletionTokens
+	record.TotalTokens = usage.TotalTokens
 	if response.StatusCode>=500 {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
@@ -359,20 +438,117 @@ func (s *Server) applyProviderHeaders(req *http.Request, provider *providerRunti
 	req.Header.Set("User-Agent", "Fantom-AI-Gateway/0.1")
 }
 
-func (s *Server) streamBody(w http.ResponseWriter, body io.Reader) {
+type tokenUsage struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
+func (s *Server) streamBody(w http.ResponseWriter, body io.Reader) tokenUsage {
 	controller := http.NewResponseController(w)
 	buffer := make([]byte, 32*1024)
+	const maxCapturedJSON = 2 << 20
+	const maxSSELine = 1 << 20
+	captured := make([]byte, 0, 32*1024)
+	pendingLine := make([]byte, 0, 4096)
+	var usage tokenUsage
+
 	for {
 		n, readErr := body.Read(buffer)
 		if n > 0 {
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil { return }
+			chunk := buffer[:n]
+			if len(captured) < maxCapturedJSON {
+				remaining := maxCapturedJSON - len(captured)
+				if len(chunk) > remaining {
+					chunk = chunk[:remaining]
+				}
+				captured = append(captured, chunk...)
+			}
+
+			remaining := buffer[:n]
+			for len(remaining) > 0 {
+				newline := bytes.IndexByte(remaining, '\n')
+				if newline < 0 {
+					if len(pendingLine)+len(remaining) <= maxSSELine {
+						pendingLine = append(pendingLine, remaining...)
+					} else {
+						pendingLine = pendingLine[:0]
+					}
+					break
+				}
+				if len(pendingLine)+newline <= maxSSELine {
+					pendingLine = append(pendingLine, remaining[:newline]...)
+					observeSSEUsage(pendingLine, &usage)
+				}
+				pendingLine = pendingLine[:0]
+				remaining = remaining[newline+1:]
+			}
+
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return usage
+			}
 			_ = controller.Flush()
 		}
 		if readErr != nil {
-			if readErr != io.EOF { s.logger.Warn("error while streaming upstream response", "error", readErr) }
-			return
+			if readErr != io.EOF {
+				s.logger.Warn("error while streaming upstream response", "error", readErr)
+			}
+			break
 		}
 	}
+
+	if len(pendingLine) > 0 {
+		observeSSEUsage(pendingLine, &usage)
+	}
+	if capturedUsage := parseResponseUsage(captured); capturedUsage.TotalTokens > 0 || capturedUsage.PromptTokens > 0 || capturedUsage.CompletionTokens > 0 {
+		usage = capturedUsage
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage
+}
+
+func observeSSEUsage(line []byte, usage *tokenUsage) {
+	line = bytes.TrimSpace(line)
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return
+	}
+	data := bytes.TrimSpace(line[len("data:"):])
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+	next := parseResponseUsage(data)
+	if next.TotalTokens > 0 || next.PromptTokens > 0 || next.CompletionTokens > 0 {
+		*usage = next
+	}
+}
+
+func parseResponseUsage(raw []byte) tokenUsage {
+	var envelope struct {
+		Usage *struct {
+			PromptTokens         int64 `json:"prompt_tokens"`
+			CompletionTokens     int64 `json:"completion_tokens"`
+			TotalTokens          int64 `json:"total_tokens"`
+			InputTokens          int64 `json:"input_tokens"`
+			OutputTokens         int64 `json:"output_tokens"`
+			PromptTokenCount     int64 `json:"promptTokenCount"`
+			CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil || envelope.Usage == nil {
+		return tokenUsage{}
+	}
+	u := envelope.Usage
+	prompt := u.PromptTokens
+	if prompt == 0 { prompt = u.InputTokens }
+	if prompt == 0 { prompt = u.PromptTokenCount }
+	completion := u.CompletionTokens
+	if completion == 0 { completion = u.OutputTokens }
+	if completion == 0 { completion = u.CandidatesTokenCount }
+	total := u.TotalTokens
+	if total == 0 { total = prompt + completion }
+	return tokenUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total}
 }
 
 func copyResponseHeaders(dst, src http.Header) {
