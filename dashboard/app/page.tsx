@@ -1,141 +1,161 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 
-type GatewayHealth = { status: string; service: string; time: string };
-type Model = { id: string; object?: string; owned_by?: string };
+type Page = "overview" | "providers" | "models" | "routing" | "keys" | "usage" | "logs" | "settings";
+type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string };
+type Model = { id:string; owned_by?:string };
+type Route = { provider:string; upstream_model:string };
+type Key = { id:string; name:string; prefix:string; enabled:boolean; created_at:string };
+type Log = { id:string; at:string; provider:string; model:string; status:number; latency_ms:number; streaming:boolean };
+type Usage = { total_requests:number; successful_requests:number; failed_requests:number; avg_latency_ms:number; by_provider:Record<string,number>; by_model:Record<string,number> };
+type Snapshot = { service:string; version:string; status:string; default_provider:string; providers:Provider[]; routes:Record<string,Route>; settings:{token_saver:string;code_mode:string}; keys:Key[]; usage:Usage; requests:Log[] };
 
-export default function Home() {
-  const [health, setHealth] = useState<GatewayHealth | null>(null);
-  const [healthError, setHealthError] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [models, setModels] = useState<Model[]>([]);
-  const [modelError, setModelError] = useState("");
-  const [loadingModels, setLoadingModels] = useState(false);
+const emptyUsage:Usage={total_requests:0,successful_requests:0,failed_requests:0,avg_latency_ms:0,by_provider:{},by_model:{}};
+const nav:{id:Page;label:string;group:string;glyph:string}[]=[
+ {id:"overview",label:"Overview",group:"WORKSPACE",glyph:"grid"},
+ {id:"providers",label:"Providers",group:"WORKSPACE",glyph:"layers"},
+ {id:"models",label:"Model catalog",group:"WORKSPACE",glyph:"cpu"},
+ {id:"routing",label:"Routing rules",group:"CONTROL PLANE",glyph:"route"},
+ {id:"keys",label:"API keys",group:"CONTROL PLANE",glyph:"key"},
+ {id:"usage",label:"Usage & cost",group:"OBSERVABILITY",glyph:"chart"},
+ {id:"logs",label:"Request logs",group:"OBSERVABILITY",glyph:"terminal"},
+ {id:"settings",label:"Settings",group:"SYSTEM",glyph:"settings"},
+];
 
-  useEffect(() => {
-    let active = true;
-    fetch("/healthz", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Gateway health check failed");
-        return (await response.json()) as GatewayHealth;
-      })
-      .then((data) => { if (active) setHealth(data); })
-      .catch((error: unknown) => {
-        if (active) setHealthError(error instanceof Error ? error.message : "Gateway is unreachable");
-      });
-    return () => { active = false; };
-  }, []);
-
-  async function loadModels() {
-    setLoadingModels(true);
-    setModelError("");
-    setModels([]);
-    try {
-      const response = await fetch("/v1/models", {
-        headers: { Authorization: "Bearer " + apiKey },
-        cache: "no-store",
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message || "Could not load models");
-      setModels(Array.isArray(data.data) ? data.data : []);
-    } catch (error) {
-      setModelError(error instanceof Error ? error.message : "Could not load models");
-    } finally {
-      setLoadingModels(false);
-    }
-  }
-
-  return (
-    <main className="shell">
-      <header className="topbar">
-        <a className="brand" href="/"><span className="brand-mark">F</span><span>FANTOM</span></a>
-        <span className="topbar-label">AI GATEWAY <span className="dot" /> SELF-HOSTED</span>
-      </header>
-      <section className="hero">
-        <div className="eyebrow"><span className="pulse" /> UNIFIED MODEL ACCESS</div>
-        <h1>One gateway.<br /><span>Every model.</span></h1>
-        <p className="intro">A lightweight, OpenAI-compatible gateway built for fast streaming, predictable routing and direct control over your provider connections.</p>
-        <div className="hero-meta">
-          <div><span className="meta-label">ENGINE</span><strong>GO</strong></div>
-          <div><span className="meta-label">DASHBOARD</span><strong>NEXT.JS / TS</strong></div>
-          <div><span className="meta-label">API</span><strong>OPENAI-COMPATIBLE</strong></div>
-        </div>
-      </section>
-      <section className="models-panel">
-        <div className="section-heading">
-          <div><span className="section-kicker">01 / PROVIDERS</span><h2>Connected provider lanes</h2></div>
-          <span className="count">2 PROVIDERS</span>
-        </div>
-        <div className="provider-grid">
-          <article className="provider-card">
-            <span className="provider-mark nvidia">NV</span>
-            <div><strong>NVIDIA NIM</strong><span>API key · model catalog · 100s timeout</span></div>
-          </article>
-          <article className="provider-card">
-            <span className="provider-mark opencode">OC</span>
-            <div><strong>OpenCode Console</strong><span>Official Console API key · paid / Go models</span></div>
-          </article>
-        </div>
-        <p className="section-copy">OpenCode Free models remain available only through the official OpenCode client. Fantom connects to the supported Console API.</p>
-      </section>
-      <section className="status-panel">
-        <div className="section-heading">
-          <div><span className="section-kicker">02 / SYSTEM</span><h2>Gateway status</h2></div>
-          <span className={health ? "status-pill online" : healthError ? "status-pill offline" : "status-pill checking"}><span /> {health ? "OPERATIONAL" : healthError ? "UNAVAILABLE" : "CHECKING"}</span>
-        </div>
-        <div className="status-grid">
-          <div className="status-cell"><span className="cell-label">SERVICE</span><strong>{health?.service || "Fantom AI Gateway"}</strong></div>
-          <div className="status-cell"><span className="cell-label">HEALTH</span><strong>{health?.status || (healthError ? "Not reachable" : "Checking…")}</strong></div>
-          <div className="status-cell"><span className="cell-label">LAST CHECK</span><strong>{health?.time ? new Date(health.time).toLocaleTimeString() : "—"}</strong></div>
-        </div>
-      </section>
-      <section className="models-panel">
-        <div className="section-heading">
-          <div><span className="section-kicker">03 / MODELS</span><h2>Model catalog</h2></div>
-          <span className="count">{models.length.toString().padStart(2, "0")} MODELS</span>
-        </div>
-        <p className="section-copy">Enter your gateway key to retrieve models from the two configured providers. Your key is used only in this browser session and is not saved.</p>
-        <form className="key-form" onSubmit={(event) => { event.preventDefault(); void loadModels(); }}>
-          <label htmlFor="gateway-key">GATEWAY API KEY</label>
-          <div className="key-row">
-            <input id="gateway-key" type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste your gateway key" />
-            <button type="submit" disabled={!apiKey.trim() || loadingModels}>{loadingModels ? "LOADING…" : "LOAD MODELS"}</button>
-          </div>
-        </form>
-        {modelError && <p className="error-message">{modelError}</p>}
-        {models.length > 0 && <div className="model-list">
-          {models.map((model) => <div className="model-row" key={model.id}><span className="model-indicator" /><strong>{model.id}</strong><span>{model.owned_by || "provider"}</span></div>)}
-        </div>}
-        {models.length === 0 && !modelError && <div className="empty-state">Your available models will appear here.</div>}
-      </section>
-      <section className="api-panel">
-        <div className="section-heading">
-          <div><span className="section-kicker">04 / OPTIMIZATION</span><h2>Token saver</h2></div>
-          <span className="count">OPT-IN PER REQUEST</span>
-        </div>
-        <div className="optimizer-row">
-          <div><strong>Safe tool-output cleanup</strong><span>ANSI, progress redraws, repeated lines and JSON whitespace</span></div>
-          <code>X-Fantom-Token-Saver: safe</code>
-        </div>
-        <div className="optimizer-row">
-          <div><strong>Compact code mode</strong><span>Minimal complete changes without skipping tests or safeguards</span></div>
-          <code>X-Fantom-Code-Mode: full</code>
-        </div>
-        <p className="footnote">User prompts, assistant content and file-read tool results are not rewritten. Estimated token savings are approximate (bytes ÷ 4).</p>
-      </section>
-      <section className="api-panel">
-        <div className="section-heading">
-          <div><span className="section-kicker">05 / INTEGRATION</span><h2>Use the API</h2></div>
-          <span className="count">CHAT COMPLETIONS</span>
-        </div>
-        <div className="code-block">
-          <div className="code-top"><span>REQUEST</span><span>POST /v1/chat/completions</span></div>
-          <pre>{"curl http://localhost:8090/v1/chat/completions \\\n  -H \"Authorization: Bearer YOUR_GATEWAY_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-Fantom-Token-Saver: safe\" \\\n  -H \"X-Fantom-Code-Mode: full\" \\\n  -d '{\n    \"model\": \"meta/your-model\",\n    \"messages\": [{\"role\":\"user\",\"content\":\"Hello\"}],\n    \"stream\": true\n  }'"} </pre>
-        </div>
-        <p className="footnote">Base URL: <code>http://localhost:8090/v1</code> · Compatible clients can use this as their OpenAI API endpoint.</p>
-      </section>
-      <footer className="footer"><span>FANTOM AI GATEWAY</span><span>BUILT WITH GO + TYPESCRIPT</span></footer>
-    </main>
-  );
+function Icon({name,size=18}:{name:string;size?:number}) {
+ const paths:Record<string,ReactNode>={
+  grid:<><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
+  layers:<><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></>,
+  cpu:<><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></>,
+  route:<><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h4a5 5 0 0 1 5 5v4M15 18h-4a5 5 0 0 1-5-5V9"/></>,
+  key:<><circle cx="8" cy="15" r="5"/><path d="m11.5 11.5 9-9M17 6l2 2m-5 1 2 2"/></>,
+  chart:<><path d="M3 3v18h18"/><path d="m7 14 4-4 4 3 6-7"/></>,
+  terminal:<><path d="m4 17 6-6-6-6m8 14h8"/></>,
+  settings:<><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.7-1l-1.7.7-1.4-2.4L7.3 15a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.7-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.7 1.4 2.4-1.4 1.1a8 8 0 0 1-.1 2Z"/></>,
+  plus:<path d="M12 5v14m-7-7h14"/>,
+  refresh:<><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.4-3"/></>,
+  search:<><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
+  check:<path d="m5 12 4 4L19 6"/>,
+  alert:<><path d="M12 3 2.7 19a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L12 3Z"/><path d="M12 9v4m0 4h.01"/></>,
+  external:<><path d="M14 3h7v7m-1-6-9 9"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></>,
+  copy:<><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,
+  trash:<><path d="M3 6h18m-2 0-1 14H6L5 6m3 0V4h8v2m-6 4v6m4-6v6"/></>,
+  logout:<><path d="M10 17l5-5-5-5m5 5H3"/><path d="M12 3h7a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-7"/></>,
+  zap:<path d="m13 2-3 9h8L9 22l3-9H4l9-11Z"/>,
+  shield:<><path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m9 12 2 2 4-4"/></>,
+ };
+ return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]||paths.grid}</svg>;
 }
+
+function formatNumber(value:number){return new Intl.NumberFormat("en-US").format(value||0)}
+function ago(value:string){if(!value)return "—";const n=Date.now()-new Date(value).getTime();if(!Number.isFinite(n))return "—";if(n<60000)return "just now";if(n<3600000)return Math.floor(n/60000)+"m ago";if(n<86400000)return Math.floor(n/3600000)+"h ago";return Math.floor(n/86400000)+"d ago"}
+function cls(...items:(string|false|undefined|null)[]){return items.filter(Boolean).join(" ")}
+
+export default function Home(){
+ const [page,setPage]=useState<Page>("overview");
+ const [apiKey,setApiKey]=useState("");
+ const [authenticated,setAuthenticated]=useState(false);
+ const [booting,setBooting]=useState(true);
+ const [busy,setBusy]=useState(false);
+ const [error,setError]=useState("");
+ const [notice,setNotice]=useState("");
+ const [snapshot,setSnapshot]=useState<Snapshot|null>(null);
+ const [models,setModels]=useState<Model[]>([]);
+ const [search,setSearch]=useState("");
+ const [showProviderForm,setShowProviderForm]=useState(false);
+ const [editingProvider,setEditingProvider]=useState<Provider|null>(null);
+ const [newKey,setNewKey]=useState("");
+ const [keyName,setKeyName]=useState("My application");
+ const [alias,setAlias]=useState("");
+ const [routeProvider,setRouteProvider]=useState("");
+ const [upstreamModel,setUpstreamModel]=useState("");
+ const [providerForm,setProviderForm]=useState({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_key:"",models:"*",timeout_seconds:"100"});
+ const [settings,setSettings]=useState({default_provider:"nvidia",token_saver:"safe",code_mode:"off"});
+
+ const request=useCallback(async(path:string,init:RequestInit={})=>{
+  const headers=new Headers(init.headers||{});headers.set("Authorization","Bearer "+apiKey);if(init.body)headers.set("Content-Type","application/json");
+  const response=await fetch(path,{...init,headers,cache:"no-store"});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data?.error?.message||data?.error||("Request failed ("+response.status+")"));
+  return data;
+ },[apiKey]);
+
+ const load=useCallback(async()=>{
+  setBusy(true);setError("");
+  try{
+   const data=await request("/api/admin/bootstrap") as Snapshot;
+   setSnapshot(data);setSettings({default_provider:data.default_provider||data.providers?.[0]?.id||"",token_saver:data.settings?.token_saver||"safe",code_mode:data.settings?.code_mode||"off"});
+   setAuthenticated(true);sessionStorage.setItem("fantom-admin-key",apiKey);
+   const [modelData,logData]=await Promise.all([request("/v1/models").catch(()=>({data:[]})),request("/api/admin/logs?limit=150").catch(()=>({requests:data.requests||[]}))]);
+   setModels(Array.isArray(modelData.data)?modelData.data:[]);
+   setSnapshot(prev=>prev?{...prev,requests:logData.requests||prev.requests}:prev);
+  }catch(e){setAuthenticated(false);setError(e instanceof Error?e.message:"Unable to connect to Fantom");}
+  finally{setBusy(false);setBooting(false);}
+ },[apiKey,request]);
+
+ useEffect(()=>{const saved=sessionStorage.getItem("fantom-admin-key");if(saved){setApiKey(saved);}setBooting(false);},[]);
+ useEffect(()=>{if(apiKey&& !authenticated && !booting){void load();}},[apiKey,authenticated,booting,load]);
+
+ async function action(fn:()=>Promise<unknown>,success:string){setBusy(true);setError("");setNotice("");try{await fn();setNotice(success);await load();}catch(e){setError(e instanceof Error?e.message:"Operation failed");}finally{setBusy(false);}}
+ function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_key:"",models:"*",timeout_seconds:"100"});setShowProviderForm(true);}
+ function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_key:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100)});setShowProviderForm(true);}
+ async function saveProvider(e:FormEvent){e.preventDefault();const body={...providerForm,models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");}
+ async function testProvider(id:string){setBusy(true);setError("");try{const data=await request("/api/admin/providers/"+encodeURIComponent(id)+"/test",{method:"POST",body:"{}"});setNotice(data.ok?"Connection test passed · HTTP "+data.http_status:"Connection test failed · "+(data.error||data.message));}catch(e){setError(e instanceof Error?e.message:"Connection test failed");}finally{setBusy(false);}}
+ async function saveRoute(e:React.FormEvent){e.preventDefault();const next={...(snapshot?.routes||{}),[alias]:{provider:routeProvider,upstream_model:upstreamModel}};await action(async()=>{await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});setAlias("");setUpstreamModel("");},"Model alias created");}
+ async function removeRoute(name:string){const next={...(snapshot?.routes||{})};delete next[name];await action(()=>request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})}),"Route removed");}
+ async function createKey(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");try{const data=await request("/api/admin/keys",{method:"POST",body:JSON.stringify({name:keyName})});setNewKey(data.key);setNotice("API key created. Copy it now; it will not be shown again.");await load();}catch(e){setError(e instanceof Error?e.message:"Could not create key");}finally{setBusy(false);}}
+ async function saveSettings(e:React.FormEvent){e.preventDefault();await action(()=>request("/api/admin/settings",{method:"PUT",body:JSON.stringify(settings)}),"Gateway settings saved");}
+ function signOut(){sessionStorage.removeItem("fantom-admin-key");setApiKey("");setAuthenticated(false);setSnapshot(null);setModels([]);}
+
+ const filteredModels=useMemo(()=>models.filter(m=>(m.id+" "+(m.owned_by||"")).toLowerCase().includes(search.toLowerCase())),[models,search]);
+ const usage=snapshot?.usage||emptyUsage;
+ const providerCount=snapshot?.providers?.length||0;
+ const activeNav=nav.find(n=>n.id===page)||nav[0];
+
+ if(booting)return <main className="boot-screen"><div className="brand-symbol">F</div><span>Starting Fantom control plane…</span></main>;
+ if(!authenticated)return <main className="login-screen"><div className="login-glow"/><div className="login-card"><div className="login-brand"><div className="brand-symbol">F</div><div><b>FANTOM</b><span>AI ROUTING CONTROL PLANE</span></div></div><div className="login-eyebrow"><i/> SELF-HOSTED GATEWAY</div><h1>Control your<br/><span>AI infrastructure.</span></h1><p>Sign in with your gateway administration key to manage providers, routes, credentials and traffic.</p><form onSubmit={e=>{e.preventDefault();void load();}}><label>GATEWAY ADMIN KEY</label><input autoFocus type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="ftm_live_… or GATEWAY_API_KEY"/><button className="primary wide" disabled={!apiKey.trim()||busy}>{busy?"AUTHENTICATING…":"OPEN CONTROL PLANE"} <Icon name="external" size={15}/></button></form>{error&&<div className="alert error"><Icon name="alert"/>{error}</div>}<div className="login-foot"><Icon name="shield" size={14}/> Credentials stay in this browser session</div></div><div className="login-version">FANTOM / 0.2 CONTROL PLANE</div></main>;
+
+ return <div className="app-shell">
+  <aside className="sidebar">
+   <div className="sidebar-brand"><div className="brand-symbol">F</div><div><b>FANTOM</b><span>ROUTING ENGINE</span></div><span className="version-tag">0.2</span></div>
+   <div className="workspace-chip"><div className="workspace-avatar">M</div><div><b>My workspace</b><span>Self-hosted instance</span></div><span className="online-dot"/></div>
+   {["WORKSPACE","CONTROL PLANE","OBSERVABILITY","SYSTEM"].map(group=><div className="nav-group" key={group}><div className="nav-caption">{group}</div>{nav.filter(n=>n.group===group).map(n=><button key={n.id} className={cls("nav-link",page===n.id&&"selected")} onClick={()=>{setPage(n.id);setError("");setNotice("");}}><Icon name={n.glyph}/><span>{n.label}</span>{n.id==="providers"&&<small>{providerCount}</small>}</button>)}</div>)}
+   <div className="sidebar-bottom"><div className="engine-status"><span className="online-dot"/><div><b>Gateway online</b><small>API accepting requests</small></div></div><button className="nav-link signout" onClick={signOut}><Icon name="logout"/> Sign out</button><div className="sidebar-meta">FANTOM AI GATEWAY <span>BUILT FOR CONTROL.</span></div></div>
+  </aside>
+  <main className="main-area">
+   <header className="topbar"><div className="crumb"><span>FANTOM</span><b>/</b>{activeNav.label}</div><div className="top-actions"><div className="system-pill"><span className="online-dot"/> CONTROL PLANE CONNECTED</div><button className="icon-button" title="Refresh data" onClick={()=>void load()} disabled={busy}><Icon name="refresh"/></button><div className="user-avatar">M</div></div></header>
+   <div className="page-wrap">
+    <div className="page-heading"><div><div className="eyebrow">{activeNav.group} / FANTOM CONTROL</div><h1>{pageTitle(page)}</h1><p>{pageDescription(page)}</p></div><div className="heading-actions">{page==="providers"&&<button className="primary" onClick={resetProvider}><Icon name="plus" size={16}/> Add provider</button>}{page==="models"&&<button className="secondary" onClick={()=>void load()}><Icon name="refresh" size={15}/> Sync catalog</button>}</div></div>
+    {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button onClick={()=>{setError("");setNotice("");}}>×</button></div>}
+    {page==="overview"&&<Overview snapshot={snapshot} models={models} onNavigate={setPage}/>}
+    {page==="providers"&&<Providers providers={snapshot?.providers||[]} onAdd={resetProvider} onEdit={editProvider} onTest={testProvider} onDelete={id=>void action(()=>request("/api/admin/providers/"+encodeURIComponent(id),{method:"DELETE"}),"Provider deleted")}/>}
+    {page==="models"&&<section className="panel"><div className="panel-toolbar"><div><b>Discovered models</b><span>{models.length} model endpoints exposed by connected providers</span></div><div className="searchbox"><Icon name="search" size={15}/><input placeholder="Search model or provider…" value={search} onChange={e=>setSearch(e.target.value)}/></div></div><div className="table-scroll"><table><thead><tr><th>MODEL ID</th><th>PROVIDER</th><th>TYPE</th><th>STATUS</th></tr></thead><tbody>{filteredModels.map(m=><tr key={m.id}><td><code className="model-code">{m.id}</code></td><td><span className="provider-inline">{m.owned_by||"—"}</span></td><td><span className="tag">CHAT</span></td><td><span className="status-text"><i/> AVAILABLE</span></td></tr>)}</tbody></table>{filteredModels.length===0&&<div className="empty">No models returned. Check provider credentials and refresh the catalog.</div>}</div></section>}
+    {page==="routing"&&<Routing routes={snapshot?.routes||{}} providers={snapshot?.providers||[]} alias={alias} setAlias={setAlias} routeProvider={routeProvider||snapshot?.providers?.[0]?.id||""} setRouteProvider={setRouteProvider} upstreamModel={upstreamModel} setUpstreamModel={setUpstreamModel} onSave={saveRoute} onRemove={removeRoute}/>}
+    {page==="keys"&&<section className="panel"><div className="panel-toolbar"><div><b>Client API credentials</b><span>Create and revoke keys for your applications and coding agents.</span></div><span className="tag">{snapshot?.keys?.filter(k=>k.enabled).length||0} ACTIVE</span></div>{newKey&&<div className="new-secret"><div><b>Copy your new key</b><span>It is displayed only once. Store it securely.</span></div><code>{newKey}</code><button className="secondary" onClick={()=>void navigator.clipboard.writeText(newKey)}><Icon name="copy" size={15}/> Copy</button><button className="ghost" onClick={()=>setNewKey("")}>Dismiss</button></div>}<form className="inline-create" onSubmit={createKey}><input value={keyName} onChange={e=>setKeyName(e.target.value)} placeholder="Key name, e.g. Production Codex"/><button className="primary" disabled={busy}><Icon name="plus" size={15}/> Generate key</button></form><div className="table-scroll"><table><thead><tr><th>NAME</th><th>KEY PREFIX</th><th>CREATED</th><th>STATUS</th><th/></tr></thead><tbody>{(snapshot?.keys||[]).map(k=><tr key={k.id}><td><b>{k.name}</b></td><td><code>{k.prefix}…</code></td><td>{new Date(k.created_at).toLocaleDateString()}</td><td><span className={cls("tag",k.enabled?"green":"red")}>{k.enabled?"ACTIVE":"REVOKED"}</span></td><td className="actions-cell">{k.enabled&&<button className="ghost danger-text" onClick={()=>void action(()=>request("/api/admin/keys/"+k.id,{method:"DELETE"}),"API key revoked")}><Icon name="trash" size={14}/> Revoke</button>}</td></tr>)}</tbody></table>{(snapshot?.keys||[]).length===0&&<div className="empty">No generated client keys yet. Your environment gateway key still works.</div>}</div></section>}
+    {page==="usage"&&<UsagePage usage={usage} requests={snapshot?.requests||[]}/>}
+    {page==="logs"&&<LogsPage requests={snapshot?.requests||[]}/>}
+    {page==="settings"&&<form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form>}
+   </div>
+   <footer className="app-footer"><span>FANTOM CONTROL PLANE <b>0.2</b></span><span>ONE ENDPOINT. TOTAL CONTROL.</span></footer>
+  </main>
+  {showProviderForm&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowProviderForm(false);}}><form className="modal" onSubmit={saveProvider}><div className="modal-head"><div><div className="eyebrow">PROVIDER CONFIGURATION</div><h2>{editingProvider?"Edit provider":"Connect a provider"}</h2></div><button type="button" className="icon-button" onClick={()=>setShowProviderForm(false)}>×</button></div><div className="form-grid"><div><label>PROVIDER ID</label><input required disabled={!!editingProvider} value={providerForm.id} onChange={e=>setProviderForm({...providerForm,id:e.target.value})} placeholder="e.g. openrouter"/></div><div><label>AUTHENTICATION</label><select value={providerForm.auth_type} onChange={e=>setProviderForm({...providerForm,auth_type:e.target.value})}><option value="bearer">Bearer API key</option><option value="none">No authentication</option></select></div><div className="span-2"><label>BASE URL</label><input required value={providerForm.base_url} onChange={e=>setProviderForm({...providerForm,base_url:e.target.value})} placeholder="https://api.provider.com/v1"/></div><div><label>CHAT COMPLETIONS PATH</label><input value={providerForm.chat_path} onChange={e=>setProviderForm({...providerForm,chat_path:e.target.value})}/></div><div><label>MODELS ENDPOINT (OPTIONAL)</label><input value={providerForm.models_url} onChange={e=>setProviderForm({...providerForm,models_url:e.target.value})} placeholder="https://…/models"/></div><div className="span-2"><label>API KEY {editingProvider&&"(leave blank to keep current)"}</label><input type="password" autoComplete="new-password" value={providerForm.api_key} onChange={e=>setProviderForm({...providerForm,api_key:e.target.value})} placeholder={editingProvider?"••••••••••••••••":"Paste provider API key"}/></div><div className="span-2"><label>MODEL ALLOWLIST</label><input value={providerForm.models} onChange={e=>setProviderForm({...providerForm,models:e.target.value})} placeholder="* or model-a, model-b"/><small>Use * to expose every model returned by the provider catalog.</small></div><div><label>TIMEOUT (SECONDS)</label><input type="number" min="1" max="600" value={providerForm.timeout_seconds} onChange={e=>setProviderForm({...providerForm,timeout_seconds:e.target.value})}/></div></div><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setShowProviderForm(false)}>Cancel</button><button className="primary" disabled={busy}>{busy?"SAVING…":"Save provider"}</button></div></form></div>}
+  <div className="mobile-nav">{nav.map(n=><button key={n.id} className={page===n.id?"active":""} onClick={()=>setPage(n.id)}><Icon name={n.glyph} size={18}/><span>{n.label.split(" ")[0]}</span></button>)}</div>
+ </div>;
+}
+
+function pageTitle(p:Page){return ({overview:"Command center",providers:"Provider connections",models:"Model catalog",routing:"Routing & aliases",keys:"API credentials",usage:"Usage intelligence",logs:"Request observability",settings:"Gateway settings"} as Record<Page,string>)[p]}
+function pageDescription(p:Page){return ({overview:"A live view of your AI infrastructure, traffic and model availability.",providers:"Connect upstreams, rotate credentials and verify provider health.",models:"A unified catalog of the models currently exposed through Fantom.",routing:"Give clients stable model names and direct each alias to its upstream.",keys:"Issue dedicated client credentials and revoke access without redeploying.",usage:"Understand traffic patterns, latency and provider distribution.",logs:"Inspect recent routed requests and diagnose provider behavior.",settings:"Configure default routing and gateway-wide optimization behavior."} as Record<Page,string>)[p]}
+
+function Overview({snapshot,models,onNavigate}:{snapshot:Snapshot|null;models:Model[];onNavigate:(p:Page)=>void}){
+ const u=snapshot?.usage||emptyUsage;const logs=snapshot?.requests||[];
+ const max=Math.max(1,...Object.values(u.by_provider||{}));
+ return <><div className="welcome-banner"><div><div className="banner-kicker"><span className="online-dot"/> LIVE GATEWAY TELEMETRY</div><h2>Your AI stack,<br/><span>under control.</span></h2><p>All routes converge here. Monitor your providers, inspect traffic and keep every model connection healthy.</p></div><div className="banner-visual"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="orbit-core">F</div><span className="orbit-node node-a"/> <span className="orbit-node node-b"/><span className="orbit-node node-c"/></div></div><div className="metrics-grid"><Metric label="TOTAL REQUESTS" value={formatNumber(u.total_requests)} detail="Recorded by Fantom" glyph="chart" tone="violet"/><Metric label="CONNECTED PROVIDERS" value={String(snapshot?.providers?.length||0)} detail="Configured upstreams" glyph="layers" tone="blue"/><Metric label="AVAILABLE MODELS" value={formatNumber(models.length)} detail="Live model catalog" glyph="cpu" tone="green"/><Metric label="AVG. LATENCY" value={u.avg_latency_ms?formatNumber(u.avg_latency_ms)+" ms":"—"} detail="End-to-end gateway time" glyph="zap" tone="amber"/></div><div className="content-grid"><section className="panel"><div className="panel-heading"><div><div className="eyebrow">INFRASTRUCTURE</div><h3>Provider health</h3></div><button className="text-button" onClick={()=>onNavigate("providers")}>Manage providers <Icon name="external" size={13}/></button></div>{(snapshot?.providers||[]).map(p=><div className="provider-health" key={p.id}><div className="provider-logo">{p.id.slice(0,2).toUpperCase()}</div><div className="provider-health-main"><b>{p.id}</b><span>{p.base_url}</span></div><span className={cls("tag",p.has_api_key?"green":"amber")}>{p.has_api_key?"CREDENTIAL SET":"NO KEY"}</span><button className="icon-button small" onClick={()=>onNavigate("providers")}><Icon name="external" size={14}/></button></div>)}{!snapshot?.providers?.length&&<div className="empty">No provider connections configured.</div>}</section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">TRAFFIC MIX</div><h3>Requests by provider</h3></div><span className="tag">ALL TIME</span></div><div className="traffic-list">{Object.entries(u.by_provider||{}).sort((a,b)=>b[1]-a[1]).map(([name,count],i)=><div className="traffic-item" key={name}><div><span>{name}</span><b>{count}</b></div><div className="bar-track"><i style={{width:(count/max*100)+"%"}} className={"bar-fill tone-"+(i%4)}/></div></div>)}{Object.keys(u.by_provider||{}).length===0&&<div className="empty compact">Traffic appears here after your first request.</div>}</div></section></div><section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">LIVE ACTIVITY</div><h3>Recent requests</h3></div><button className="text-button" onClick={()=>onNavigate("logs")}>View all logs <Icon name="external" size={13}/></button></div><RequestTable rows={logs.slice(0,6)}/></section><div className="quick-actions"><button onClick={()=>onNavigate("providers")}><span className="quick-icon"><Icon name="plus"/></span><b>Connect provider</b><small>Add an upstream API</small></button><button onClick={()=>onNavigate("routing")}><span className="quick-icon"><Icon name="route"/></span><b>Create model alias</b><small>Build a stable model name</small></button><button onClick={()=>onNavigate("keys")}><span className="quick-icon"><Icon name="key"/></span><b>Issue API key</b><small>Give an app access</small></button><button onClick={()=>onNavigate("usage")}><span className="quick-icon"><Icon name="chart"/></span><b>Analyze usage</b><small>Inspect gateway traffic</small></button></div></>;
+}
+function Metric({label,value,detail,glyph,tone}:{label:string;value:string;detail:string;glyph:string;tone:string}){return <div className="metric-card"><div className="metric-top"><span>{label}</span><div className={"icon-tile "+tone}><Icon name={glyph} size={17}/></div></div><b className="metric-value">{value}</b><small>{detail}</small></div>}
+function Providers({providers,onAdd,onEdit,onTest,onDelete}:{providers:Provider[];onAdd:()=>void;onEdit:(p:Provider)=>void;onTest:(id:string)=>void;onDelete:(id:string)=>void}){return <><div className="provider-cards">{providers.map((p,i)=><article className="provider-large" key={p.id}><div className="provider-card-head"><div className={"provider-logo big tone-"+(i%4)}>{p.id.slice(0,2).toUpperCase()}</div><span className={cls("tag",p.has_api_key?"green":"amber")}>{p.has_api_key?"CONNECTED":"NEEDS CREDENTIAL"}</span></div><h3>{p.id}</h3><p className="provider-url">{p.base_url}</p><div className="provider-stats"><div><small>MODELS</small><b>{p.models?.includes("*")?"All available":p.models?.length||0}</b></div><div><small>TIMEOUT</small><b>{p.timeout_seconds}s</b></div><div><small>AUTH</small><b>{p.auth_type==="none"?"None":"Bearer"}</b></div></div><div className="provider-key-line"><Icon name="key" size={14}/><span>{p.api_key_preview||"No credential configured"}</span></div><div className="provider-actions"><button className="secondary" onClick={()=>onTest(p.id)}><Icon name="zap" size={14}/> Test connection</button><button className="secondary" onClick={()=>onEdit(p)}>Configure</button><button className="icon-button" title="Delete provider" onClick={()=>onDelete(p.id)}><Icon name="trash" size={15}/></button></div></article>)}</div><div className="add-provider-card" onClick={onAdd}><div className="add-circle"><Icon name="plus" size={20}/></div><b>Connect another provider</b><span>OpenAI-compatible APIs, custom endpoints and more.</span></div></>}
+function Routing({routes,providers,alias,setAlias,routeProvider,setRouteProvider,upstreamModel,setUpstreamModel,onSave,onRemove}:{routes:Record<string,Route>;providers:Provider[];alias:string;setAlias:(v:string)=>void;routeProvider:string;setRouteProvider:(v:string)=>void;upstreamModel:string;setUpstreamModel:(v:string)=>void;onSave:(e:React.FormEvent)=>void;onRemove:(n:string)=>void}){return <div className="routing-layout"><section className="panel route-create"><div className="panel-heading"><div><div className="eyebrow">MODEL ABSTRACTION</div><h3>Create a model alias</h3></div><div className="icon-tile violet"><Icon name="route"/></div></div><p className="muted-copy">Expose a stable model name to your clients and map it to the actual model and provider upstream.</p><form onSubmit={onSave}><label>PUBLIC MODEL NAME</label><input required value={alias} onChange={e=>setAlias(e.target.value)} placeholder="e.g. fantom-fast"/><label>UPSTREAM PROVIDER</label><select required value={routeProvider} onChange={e=>setRouteProvider(e.target.value)}>{providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select><label>UPSTREAM MODEL ID</label><input required value={upstreamModel} onChange={e=>setUpstreamModel(e.target.value)} placeholder="e.g. meta/llama-3.3-70b-instruct"/><button className="primary wide" disabled={!providers.length}><Icon name="plus" size={15}/> Create route</button></form></section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">ACTIVE ROUTING TABLE</div><h3>Model aliases</h3></div><span className="tag">{Object.keys(routes).length} ROUTES</span></div><div className="route-list">{Object.entries(routes).map(([name,route])=><div className="route-row" key={name}><div className="route-source"><code>{name}</code><small>CLIENT MODEL</small></div><div className="route-arrow"><Icon name="route" size={17}/></div><div className="route-target"><b>{route.upstream_model}</b><small>{route.provider}</small></div><button className="icon-button" onClick={()=>onRemove(name)} title="Remove route"><Icon name="trash" size={14}/></button></div>)}{Object.keys(routes).length===0&&<div className="empty">No aliases configured. Create one to decouple client model names from upstream providers.</div>}</div></section></div>}
+function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){const max=Math.max(1,...Object.values(usage.by_model||{}));return <><div className="metrics-grid three"><Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/><Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/><Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/></div><div className="content-grid"><section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>{Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}{Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}</section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div><div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div><p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p><div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div><div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div></section></div><section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section></>}
+function LogsPage({requests}:{requests:Log[]}){return <section className="panel"><div className="panel-toolbar"><div><b>Gateway request log</b><span>Most recent {requests.length} requests · retention up to 5,000 records</span></div><span className="tag">RECENT</span></div><RequestTable rows={requests}/>{requests.length===0&&<div className="empty">No requests have passed through this gateway yet.</div>}</section>}
+function RequestTable({rows}:{rows:Log[]}){return <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>MODEL</th><th>PROVIDER</th><th>STATUS</th><th>LATENCY</th><th>WHEN</th></tr></thead><tbody>{rows.map(r=><tr key={r.id+"-"+r.at}><td><code className="request-id">{(r.id||"—").slice(0,12)}</code></td><td><code className="model-code">{r.model||"—"}</code>{r.streaming&&<span className="stream-tag">SSE</span>}</td><td>{r.provider||"—"}</td><td><span className={cls("status-code",r.status>=200&&r.status<400?"good":"bad")}>{r.status||"—"}</span></td><td>{r.latency_ms} ms</td><td>{ago(r.at)}</td></tr>)}</tbody></table></div>}

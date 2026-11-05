@@ -14,6 +14,7 @@ services:
       GATEWAY_LISTEN_ADDR: ":8080"
       CONFIG_FILE: /app/configs/providers.json
       STATIC_DIR: /app/dashboard
+      FANTOM_DATA_DIR: /data
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       NVIDIA_API_KEYS: ${NVIDIA_API_KEYS:-}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
@@ -26,6 +27,7 @@ services:
       - "${FANTOM_BIND:-127.0.0.1:8090}:8080"
     volumes:
       - ./configs:/app/configs:ro
+      - fantom-data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -37,3 +39,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  fantom-data:

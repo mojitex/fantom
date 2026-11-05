@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,10 +33,12 @@ func (p *providerRuntime) apiKey() string {
 }
 
 type Server struct {
-	config    *config.Config
-	providers map[string]*providerRuntime
-	logger    *slog.Logger
-	requestID atomic.Uint64
+	config      *config.Config
+	providersMu sync.RWMutex
+	providers   map[string]*providerRuntime
+	store       *adminStore
+	logger      *slog.Logger
+	requestID   atomic.Uint64
 }
 
 type modelItem struct {
@@ -56,31 +59,40 @@ type modelRequest struct {
 
 func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	if logger == nil { logger = slog.Default() }
-	s := &Server{config: cfg, providers: make(map[string]*providerRuntime, len(cfg.Providers)), logger: logger}
-	for _, provider := range cfg.Providers {
-		if provider.ChatPath == "" {
-			provider.ChatPath = "/chat/completions"
-		}
-		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-		transport := &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: dialer.DialContext,
-			ForceAttemptHTTP2: true,
-			MaxIdleConns: 256,
-			MaxIdleConnsPerHost: 64,
-			IdleConnTimeout: 90 * time.Second,
-			TLSHandshakeTimeout: 10 * time.Second,
-			ExpectContinueTimeout: time.Second,
-			ResponseHeaderTimeout: time.Duration(provider.TimeoutSeconds) * time.Second,
-		}
-		s.providers[provider.ID] = &providerRuntime{config: provider, client: &http.Client{Transport: transport}}
+	store, err := newAdminStore(cfg)
+	if err != nil {
+		logger.Error("could not initialize persistent admin state", "error", err)
+		store = &adminStore{path:"./data/fantom-state.json", data:adminState{Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode}}
+		for _,p := range cfg.Providers { store.data.Providers=append(store.data.Providers,persistProvider(p)) }
 	}
+	s := &Server{config: cfg, providers: make(map[string]*providerRuntime), store:store, logger: logger}
+	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
 	mux.HandleFunc("/", s.handleDashboard)
 	return s.withRequestID(mux)
+}
+
+func newProviderRuntime(provider config.Provider) *providerRuntime {
+	if provider.ChatPath=="" { provider.ChatPath="/chat/completions" }
+	timeout:=provider.TimeoutSeconds; if timeout<=0 { timeout=100 }
+	dialer:=&net.Dialer{Timeout:10*time.Second,KeepAlive:30*time.Second}
+	transport:=&http.Transport{Proxy:http.ProxyFromEnvironment,DialContext:dialer.DialContext,ForceAttemptHTTP2:true,MaxIdleConns:256,MaxIdleConnsPerHost:64,IdleConnTimeout:90*time.Second,TLSHandshakeTimeout:10*time.Second,ExpectContinueTimeout:time.Second,ResponseHeaderTimeout:time.Duration(timeout)*time.Second}
+	return &providerRuntime{config:provider,client:&http.Client{Transport:transport}}
+}
+
+func (s *Server) reloadProviderRuntime() {
+	state:=s.store.snapshot()
+	next:=make(map[string]*providerRuntime,len(state.Providers))
+	for _,saved:=range state.Providers { p:=saved.runtime(); next[p.ID]=newProviderRuntime(p) }
+	s.providersMu.Lock(); s.providers=next; s.providersMu.Unlock()
+}
+func (s *Server) providerByID(id string) *providerRuntime {
+	s.providersMu.RLock(); defer s.providersMu.RUnlock()
+	return s.providers[id]
 }
 
 func (s *Server) withRequestID(next http.Handler) http.Handler {
@@ -95,24 +107,44 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 	})
 }
 
+func bearerToken(r *http.Request) (string, bool) {
+	value:=strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix="Bearer "
+	if !strings.HasPrefix(value,prefix) { return "",false }
+	return strings.TrimSpace(strings.TrimPrefix(value,prefix)),true
+}
+
+func (s *Server) environmentKeyValid(provided string) bool {
+	valid:=0
+	for _,key:=range s.config.GatewayAPIKeys {
+		if subtle.ConstantTimeCompare([]byte(provided),[]byte(key))==1 { valid=1 }
+	}
+	return valid==1
+}
+
 func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		value := strings.TrimSpace(r.Header.Get("Authorization"))
-		const prefix = "Bearer "
-		if !strings.HasPrefix(value, prefix) {
-			writeAPIError(w, http.StatusUnauthorized, "missing or invalid bearer token", "authentication_error")
+	return func(w http.ResponseWriter,r *http.Request) {
+		provided,ok:=bearerToken(r)
+		valid:=ok && s.environmentKeyValid(provided)
+		if ok && !valid && s.store!=nil { valid=s.store.keyValid(provided) }
+		if !valid {
+			writeAPIError(w,http.StatusUnauthorized,"missing or invalid bearer token","authentication_error")
 			return
 		}
-		provided := strings.TrimSpace(strings.TrimPrefix(value, prefix))
-		valid := 0
-		for _, key := range s.config.GatewayAPIKeys {
-			valid |= subtle.ConstantTimeCompare([]byte(provided), []byte(key))
-		}
-		if valid != 1 {
-			writeAPIError(w, http.StatusUnauthorized, "invalid API key", "authentication_error")
+		next(w,r)
+	}
+}
+
+// Admin operations are intentionally restricted to the environment-level administrator key.
+// Generated application keys can call the model API but cannot mutate gateway configuration.
+func (s *Server) authenticateAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter,r *http.Request) {
+		provided,ok:=bearerToken(r)
+		if !ok || !s.environmentKeyValid(provided) {
+			writeAPIError(w,http.StatusUnauthorized,"administrator key required","authentication_error")
 			return
 		}
-		next(w, r)
+		next(w,r)
 	}
 }
 
@@ -139,49 +171,31 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	items := make([]modelItem, 0)
-	seen := make(map[string]struct{})
-	for _, providerConfig := range s.config.Providers {
-		runtime := s.providers[providerConfig.ID]
-		if runtime == nil { continue }
-		if runtime.config.AuthType == "bearer" && len(runtime.config.APIKeys) == 0 {
-			for _, configuredModel := range runtime.config.Models {
-				if configuredModel != "*" {
-					appendModel(&items, seen, modelItem{ID: configuredModel, Object: "model", OwnedBy: runtime.config.ID})
-				}
-			}
+	state:=s.store.snapshot()
+	items:=make([]modelItem,0)
+	seen:=make(map[string]struct{})
+	for _,saved:=range state.Providers {
+		runtime:=s.providerByID(saved.ID)
+		if runtime==nil { continue }
+		if runtime.config.AuthType=="bearer" && len(runtime.config.APIKeys)==0 {
+			for _,model:=range runtime.config.Models { if model!="*" { appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID}) } }
 			continue
 		}
-		modelsURL := runtime.config.ModelsURL
-		if modelsURL == "" {
-			modelsURL = runtime.config.BaseURL + "/models"
-		}
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, modelsURL, nil)
-		if err != nil { continue }
-		s.applyProviderHeaders(req, runtime, runtime.apiKey())
-		resp, err := runtime.client.Do(req)
-		if err != nil {
-			s.logger.Warn("provider model catalog request failed", "provider", runtime.config.ID, "error", err)
-			continue
-		}
+		modelsURL:=runtime.config.ModelsURL
+		if modelsURL=="" { modelsURL=runtime.config.BaseURL+"/models" }
+		req,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,modelsURL,nil)
+		if err!=nil { continue }
+		s.applyProviderHeaders(req,runtime,runtime.apiKey())
+		resp,err:=runtime.client.Do(req)
+		if err!=nil { s.logger.Warn("provider model catalog request failed","provider",runtime.config.ID,"error",err); continue }
 		var remote upstreamModelList
-		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&remote)
+		decodeErr:=json.NewDecoder(io.LimitReader(resp.Body,8<<20)).Decode(&remote)
 		_ = resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 || decodeErr != nil {
-			s.logger.Warn("provider model catalog returned an error", "provider", runtime.config.ID, "status", resp.StatusCode, "decode_error", decodeErr)
-			continue
-		}
-		for _, model := range remote.Data {
-			if model.ID == "" || !modelAllowed(runtime.config.Models, model.ID) { continue }
-			appendModel(&items, seen, modelItem{ID: model.ID, Object: "model", OwnedBy: runtime.config.ID})
-		}
+		if resp.StatusCode<200||resp.StatusCode>=300||decodeErr!=nil { s.logger.Warn("provider model catalog returned an error","provider",runtime.config.ID,"status",resp.StatusCode,"decode_error",decodeErr); continue }
+		for _,model:=range remote.Data { if model.ID!=""&&modelAllowed(runtime.config.Models,model.ID) { appendModel(&items,seen,modelItem{ID:model.ID,Object:"model",OwnedBy:runtime.config.ID}) } }
 	}
-	for alias, route := range s.config.Routes {
-		if s.providers[route.Provider] != nil {
-			appendModel(&items, seen, modelItem{ID: alias, Object: "model", OwnedBy: route.Provider})
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": items})
+	for alias,route:=range state.Routes { if s.providerByID(route.Provider)!=nil { appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider}) } }
+	writeJSON(w,http.StatusOK,map[string]any{"object":"list","data":items})
 }
 
 func appendModel(items *[]modelItem, seen map[string]struct{}, item modelItem) {
@@ -191,7 +205,13 @@ func appendModel(items *[]modelItem, seen map[string]struct{}, item modelItem) {
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxRequestBytes)
+	started:=time.Now()
+	recorder:=&statusRecorder{ResponseWriter:w}
+	w=recorder
+	record:=requestRecord{ID:r.Header.Get("X-Request-ID"),At:started.UTC()}
+	defer func(){ if recorder.status==0 { recorder.status=http.StatusOK }; record.Status=recorder.status; record.LatencyMS=time.Since(started).Milliseconds(); if s.store!=nil { s.store.appendRequest(record) } }()
+	maxBytes:=s.config.MaxRequestBytes; if maxBytes<=0 { maxBytes=32<<20 }
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "request body is too large or unreadable", "invalid_request_error")
@@ -208,80 +228,115 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providerMap := make(map[string]config.Provider, len(s.config.Providers))
-	for _, provider := range s.config.Providers { providerMap[provider.ID] = provider }
-	target, err := routing.Resolve(input.Model, s.config.Routes, s.config.DefaultProvider, providerMap)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error(), "model_not_found")
-		return
-	}
-	provider := s.providers[target.ProviderID]
-	if provider == nil {
-		writeAPIError(w, http.StatusBadGateway, "provider is not available", "provider_error")
-		return
-	}
-	key := provider.apiKey()
-	if provider.config.AuthType == "bearer" && key == "" {
-		writeAPIError(w, http.StatusServiceUnavailable, "provider API key is not configured", "provider_configuration_error")
-		return
-	}
-	if target.UpstreamModel != input.Model {
-		modelJSON, _ := json.Marshal(target.UpstreamModel)
-		payload["model"] = modelJSON
-		body, err = json.Marshal(payload)
-		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, "could not encode routed request", "invalid_request_error")
-			return
+	state:=s.store.snapshot()
+	record.Model=input.Model
+	record.Streaming=string(payload["stream"])=="true"
+	providerMap:=make(map[string]config.Provider,len(state.Providers))
+	for _,saved:=range state.Providers { p:=saved.runtime(); providerMap[p.ID]=p }
+
+	candidates:=[]string{input.Model}
+	seenCandidates:=map[string]bool{input.Model:true}
+	if primary,ok:=state.Routes[input.Model]; ok {
+		for _,fallback:=range primary.FallbackModels {
+			fallback=strings.TrimSpace(fallback)
+			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
 	}
 
-	saverMode := r.Header.Get("X-Fantom-Token-Saver")
-	if strings.TrimSpace(saverMode) == "" {
-		saverMode = s.config.DefaultTokenSaver
-	}
-	codeMode := r.Header.Get("X-Fantom-Code-Mode")
-	if strings.TrimSpace(codeMode) == "" {
-		codeMode = s.config.DefaultCodeMode
-	}
-	body, optimizationStats := optimizer.Apply(body, saverMode, codeMode)
-	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe"))
-	w.Header().Set("X-Fantom-Code-Mode", normalizedMode(codeMode, "lite", "full", "ultra"))
-	if optimizationStats.ToolResultsChanged > 0 {
-		w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
-		w.Header().Set("X-Fantom-Bytes-Saved", fmt.Sprint(optimizationStats.SavedBytes()))
-		w.Header().Set("X-Fantom-Estimated-Tokens-Saved", fmt.Sprint(optimizationStats.SavedBytes()/4))
-	}
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, provider.config.BaseURL+provider.config.ChatPath, bytes.NewReader(body))
-	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, "could not create upstream request", "provider_error")
-		return
-	}
-	upstreamRequest.Header.Set("Content-Type", "application/json")
-	accept := strings.TrimSpace(r.Header.Get("Accept"))
-	if accept == "" { accept = "application/json" }
-	upstreamRequest.Header.Set("Accept", accept)
-	upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
-	// OpenCode Console uses this stable value to keep conversation routing and prompt caching consistent.
-	if provider.config.ID == "opencode-console" {
-		if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
-		upstreamRequest.Header.Set("x-opencode-session", session)
-		}
-	}
-	s.applyProviderHeaders(upstreamRequest, provider, key)
+	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
+	if strings.TrimSpace(saverMode)=="" { saverMode=state.DefaultTokenSaver }
+	codeMode:=r.Header.Get("X-Fantom-Code-Mode")
+	if strings.TrimSpace(codeMode)=="" { codeMode=state.DefaultCodeMode }
+	saverMode=normalizedMode(saverMode,"safe","off")
+	codeMode=normalizedMode(codeMode,"lite","full","ultra")
+	w.Header().Set("X-Fantom-Token-Saver",saverMode)
+	w.Header().Set("X-Fantom-Code-Mode",codeMode)
 
-	response, err := provider.client.Do(upstreamRequest)
-	if err != nil {
-		if r.Context().Err() != nil { return }
-		s.logger.Warn("upstream request failed", "provider", provider.config.ID, "model", input.Model, "error", err)
-		writeAPIError(w, http.StatusBadGateway, "upstream provider connection failed: "+err.Error(), "provider_error")
+	var response *http.Response
+	var lastErr error
+	var selectedProvider *providerRuntime
+	attempts:=0
+	for candidateIndex,candidateModel:=range candidates {
+		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
+		if resolveErr!=nil { lastErr=resolveErr; continue }
+		provider:=s.providerByID(target.ProviderID)
+		record.Provider=target.ProviderID
+		if provider==nil { lastErr=fmt.Errorf("provider %q is not available",target.ProviderID); continue }
+		key:=provider.apiKey()
+		if provider.config.AuthType=="bearer"&&key=="" { lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID); continue }
+
+		attemptPayload:=make(map[string]json.RawMessage,len(payload))
+		for name,value:=range payload { attemptPayload[name]=value }
+		modelJSON,_:=json.Marshal(target.UpstreamModel)
+		attemptPayload["model"]=modelJSON
+		attemptBody,marshalErr:=json.Marshal(attemptPayload)
+		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
+		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
+		if optimizationStats.ToolResultsChanged>0 {
+			w.Header().Set("X-Fantom-Tool-Results-Optimized",fmt.Sprint(optimizationStats.ToolResultsChanged))
+			w.Header().Set("X-Fantom-Bytes-Saved",fmt.Sprint(optimizationStats.SavedBytes()))
+			w.Header().Set("X-Fantom-Estimated-Tokens-Saved",fmt.Sprint(optimizationStats.SavedBytes()/4))
+		}
+
+		upstreamRequest,requestErr:=http.NewRequestWithContext(r.Context(),http.MethodPost,provider.config.BaseURL+provider.config.ChatPath,bytes.NewReader(attemptBody))
+		if requestErr!=nil { lastErr=requestErr; continue }
+		upstreamRequest.Header.Set("Content-Type","application/json")
+		accept:=strings.TrimSpace(r.Header.Get("Accept")); if accept=="" { accept="application/json" }
+		upstreamRequest.Header.Set("Accept",accept)
+		upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
+		if provider.config.ID=="opencode-console" {
+			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\r\n") {
+				upstreamRequest.Header.Set("x-opencode-session",session)
+			}
+		}
+		s.applyProviderHeaders(upstreamRequest,provider,key)
+		attempts++
+		response,requestErr=provider.client.Do(upstreamRequest)
+		if requestErr!=nil {
+			if r.Context().Err()!=nil { return }
+			lastErr=requestErr
+			s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
+			response=nil
+			continue
+		}
+		if shouldFallback(response.StatusCode)&&candidateIndex<len(candidates)-1 {
+			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
+			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
+			_ = response.Body.Close()
+			response=nil
+			continue
+		}
+		selectedProvider=provider
+		record.Provider=provider.config.ID
+		break
+	}
+	if response==nil {
+		message:="no configured route could serve this model"
+		status:=http.StatusBadGateway
+		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
+		writeAPIError(w,status,message,"provider_error")
 		return
 	}
 	defer response.Body.Close()
-	copyResponseHeaders(w.Header(), response.Header)
+	if selectedProvider!=nil {
+		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
+	}
+	if attempts>1 { w.Header().Set("X-Fantom-Fallback-Attempts",fmt.Sprint(attempts-1)) }
+	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
-	s.streamBody(w, response.Body)
-	if response.StatusCode >= 500 {
-		s.logger.Warn("upstream provider returned server error", "provider", provider.config.ID, "model", input.Model, "status", response.StatusCode)
+	s.streamBody(w,response.Body)
+	if response.StatusCode>=500 {
+		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
+		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
+	}
+}
+
+func shouldFallback(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -347,3 +402,10 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+
+
+type statusRecorder struct { http.ResponseWriter; status int }
+func (w *statusRecorder) WriteHeader(code int) { if w.status!=0 { return }; w.status=code; w.ResponseWriter.WriteHeader(code) }
+func (w *statusRecorder) Write(p []byte) (int,error) { if w.status==0 { w.WriteHeader(http.StatusOK) }; return w.ResponseWriter.Write(p) }
+func (w *statusRecorder) Flush() { if w.status==0 { w.WriteHeader(http.StatusOK) }; if f,ok:=w.ResponseWriter.(http.Flusher); ok { f.Flush() } }
+func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }

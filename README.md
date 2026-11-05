@@ -1,185 +1,126 @@
-# Fantom AI Gateway
+# Fantom — AI Routing Control Plane
 
-Fantom is a standalone, OpenAI-compatible AI Gateway built with Go and a TypeScript/Next.js dashboard. The dashboard is exported as static assets and served by the Go process, so the complete product is published as one Docker service.
+Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js control-plane dashboard. The dashboard and API ship together in one multi-architecture Docker image.
 
-Docker Hub image: monsmain/fantom
+**Image:** `monsmain/fantom:latest`  
+**Repository:** https://github.com/mojitex/fantom
 
-## The two configured providers
+## What is in this release
 
-1. **NVIDIA NIM** — uses `NVIDIA_API_KEY` or a comma-separated key pool in `NVIDIA_API_KEYS`.
-2. **OpenCode Console** — uses an official personal or service-account API key in `OPENCODE_API_KEY`. The starter allowlist contains `kimi-k3`; add the exact model IDs enabled for your Console workspace to `configs/providers.json`.
+### Control plane
+- A multi-page dark operations dashboard: Command Center, Providers, Model Catalog, Routing & Aliases, API Keys, Usage, Request Logs and Settings.
+- Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
+- Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API.
+- Model aliases map a stable client-facing ID to an upstream provider and model.
+- Generate and revoke client API keys. Generated keys are only displayed once and stored as SHA-256 hashes.
+- Request history and basic provider/model/latency aggregates (last 5,000 requests).
+- Default provider, token saver and code-mode settings are stored persistently.
 
-OpenCode's free-tier chat models are restricted to requests originating from the OpenCode client. Fantom does not impersonate that client or bypass that restriction; use Console models or a Go subscription through the documented API.
-
-## Features
-
-- OpenAI-compatible `POST /v1/chat/completions` and `GET /v1/models`.
-- Exactly two providers configured initially: NVIDIA NIM and OpenCode Console.
-- Provider-specific chat and model-catalog endpoints.
-- Multiple NVIDIA upstream keys with round-robin selection.
-- Reusable HTTP connection pools, keep-alive, HTTP/2 negotiation and incremental SSE forwarding.
-- Per-provider response-header timeout (100 seconds by default).
+### Gateway runtime
+- `GET /v1/models` and `POST /v1/chat/completions`.
+- NVIDIA NIM and OpenCode Console are preconfigured; more OpenAI-compatible providers can be added from the dashboard.
+- Provider-specific chat paths and model-catalog URLs.
+- Multiple upstream NVIDIA keys, round-robin key selection, pooled HTTP connections, HTTP/2 and incremental SSE forwarding.
+- 100-second default response-header timeout; configurable per provider.
 - Optional outbound HTTP/HTTPS proxy.
-- Gateway API-key authentication, request IDs and structured JSON logs.
-- Opt-in code-generation modes inspired by Ponytail's minimal-change principles.
-- Safe command-tool result cleanup inspired by RTK's normalization approach.
-- One multi-architecture Docker image containing both API and dashboard.
+- Safe command-tool output normalization and optional compact code-mode instructions.
+- Bearer-key authentication, request IDs, health endpoint and structured logs.
 
-This is an initial foundation, not yet a feature-for-feature replacement for 8room. Persistent users, usage accounting, quotas, admin CRUD, advanced failover and database-backed settings remain later milestones.
+## Important scope and compatibility notes
 
-## Run with Docker Compose
+This is a much more capable control plane than the original starter page, but it is not yet a feature-for-feature clone of 9Router or OmniRoute. In particular, this build does **not** yet include OAuth/device-code onboarding, multi-account quota-aware selection, combo/fallback chains, cross-protocol Claude/Gemini/Responses translation, billing/pricing calculations, or provider token-refresh workflows. The request analytics currently records status, provider, model and elapsed time; it does not claim provider-reported token usage when the upstream does not return it.
 
-1. Copy the environment template:
+The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode free-tier restrictions are not bypassed; use supported Console/Go API access. Add compatible endpoints from the Providers page.
 
-   ```bash
-   cp .env.example .env
-   ```
+## Deploy on Railway
 
-   Windows PowerShell:
+1. Deploy the `monsmain/fantom:latest` image (or connect this repository and use its Dockerfile).
+2. Set the Railway service's listening port to **8080** (the container listens on `:8080`).
+3. Add these variables:
 
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+   | Variable | Required | Purpose |
+   |---|---|---|
+   | `GATEWAY_API_KEY` | Yes | First dashboard/admin login and gateway access |
+   | `NVIDIA_API_KEY` | Optional | NVIDIA NIM upstream credential |
+   | `OPENCODE_API_KEY` | Optional | OpenCode Console upstream credential |
+   | `FANTOM_DATA_DIR` | Recommended | Set to `/data` |
+   | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
+   | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
 
-2. Set a long random `GATEWAY_API_KEY`, your `NVIDIA_API_KEY`, and your official `OPENCODE_API_KEY`.
+4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Without a persistent volume, the container filesystem can be reset by a redeploy.
+5. Open the generated Railway domain. Sign in with `GATEWAY_API_KEY`.
 
-3. Start Fantom:
+For a self-hosted Docker deployment, `compose.yaml` creates a named `fantom-data` volume automatically.
 
-   ```bash
-   docker compose up -d --build
-   ```
+## API usage
 
-4. Open the dashboard at http://localhost:8090.
-
-The default bind is localhost-only (`127.0.0.1:8090`). To expose it, set `FANTOM_BIND=0.0.0.0:8090` only behind a firewall and HTTPS reverse proxy.
-
-## Use the API
-
-Base URL: `http://localhost:8090/v1`
+Base URL: `https://YOUR-DOMAIN/v1`
 
 ```bash
-curl http://localhost:8090/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+curl https://YOUR-DOMAIN/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" \
   -H "Content-Type: application/json" \
-  -H "X-Fantom-Token-Saver: safe" \
-  -H "X-Fantom-Code-Mode: full" \
   -d '{
     "model": "meta/your-model",
-    "messages": [{"role": "user", "content": "Hello"}],
+    "messages": [{"role":"user","content":"Hello"}],
     "stream": true
   }'
 ```
 
-The model catalog and chat endpoint require `Authorization: Bearer YOUR_GATEWAY_KEY`. `/healthz` is public.
+The same key is accepted by protected `/v1/*` and `/api/admin/*` endpoints. Use generated client keys for applications; reserve the environment key for administration.
 
-## Token saver
+## Admin API
 
-The default mode is configured by `FANTOM_TOKEN_SAVER=safe`. It only touches recognized command-tool results (`bash`, `shell`, `terminal`, `command`, or `exec`) and:
+All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 
-- removes terminal ANSI control sequences;
-- keeps the final content of progress lines redrawn with carriage returns;
-- collapses consecutive identical non-empty lines;
-- minifies valid JSON without changing its data.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/admin/bootstrap` | Dashboard data and overview |
+| GET / POST | `/api/admin/providers` | List or add providers |
+| PUT / DELETE | `/api/admin/providers/{id}` | Update or remove a provider |
+| POST | `/api/admin/providers/{id}/test` | Test provider model-catalog connectivity |
+| GET / PUT | `/api/admin/routes` | Read or replace model aliases |
+| GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
+| DELETE | `/api/admin/keys/{id}` | Revoke a generated key |
+| GET | `/api/admin/usage` | Aggregated request metrics |
+| GET | `/api/admin/logs` | Recent request history |
+| GET / PUT | `/api/admin/settings` | Default provider and optimization settings |
 
-User prompts, assistant messages, and file-read tool results are left untouched. The optimizer does not discard large arbitrary blocks or replace file contents with unrecoverable placeholders.
-
-Per request, override the default:
-
-- `X-Fantom-Token-Saver: safe` — normalization and repeated-line cleanup (default).
-- `X-Fantom-Token-Saver: off` — pass the request body through unchanged.
-- `X-Fantom-Code-Mode: lite|full|ultra` — prepend a compact coding instruction that prioritizes minimal, complete changes. Default: off.
-
-Responses report `X-Fantom-Tool-Results-Optimized`, `X-Fantom-Bytes-Saved` and `X-Fantom-Estimated-Tokens-Saved` when a command result was shortened. The estimate is bytes divided by four, not a provider tokenizer measurement.
-
-RTK's own `rtk-proxy` is licensed BUSL-1.1 and its terms restrict offering the daemon or a derivative as a paid or hosted third-party service. Fantom therefore implements its own limited normalization logic rather than bundling or copying that daemon. Ponytail's ideas are represented by a small, opt-in code-mode directive rather than injecting its full skill into every request.
-
-## Provider configuration
-
-Edit `configs/providers.json`; keep API keys in environment variables, not JSON.
-
-NVIDIA uses:
+### Provider payload
 
 ```json
 {
-  "id": "nvidia",
-  "base_url": "https://integrate.api.nvidia.com/v1",
+  "id": "my-openai-compatible",
+  "base_url": "https://api.example.com/v1",
   "chat_path": "/chat/completions",
-  "api_key_env": "NVIDIA_API_KEY",
-  "api_keys_env": "NVIDIA_API_KEYS",
+  "models_url": "https://api.example.com/v1/models",
+  "auth_type": "bearer",
+  "api_key": "provider-secret",
   "models": ["*"],
   "timeout_seconds": 100
 }
 ```
 
-OpenCode Console uses separate URLs for chat and model discovery:
+Use `models: ["*"]` to expose all models returned by the provider's model endpoint, or list explicit model IDs. Credentials are saved to the protected state file and redacted from dashboard responses.
 
-```json
-{
-  "id": "opencode-console",
-  "base_url": "https://opencode.ai/inference/openai/v1",
-  "chat_path": "/chat/completions",
-  "models_url": "https://opencode.ai/inference/v1/models",
-  "api_key_env": "OPENCODE_API_KEY",
-  "models": ["kimi-k3"],
-  "timeout_seconds": 100
-}
-```
+## Token saver
 
-- `base_url`: upstream API base URL.
-- `chat_path`: chat-completions path, defaults to `/chat/completions`.
-- `models_url`: optional absolute URL for model discovery; if omitted, Fantom requests `base_url + /models`.
-- `auth_type`: `bearer` or `none`.
-- `api_key_env`: environment variable for one key.
-- `api_keys_env`: comma-separated key pool; takes precedence when non-empty.
-- `models`: exact model IDs or `*`.
-- `timeout_seconds`: response-header timeout, default 100 and maximum 600.
-- `headers`: optional provider-specific headers.
+- `FANTOM_TOKEN_SAVER=safe` normalizes recognized command-tool results only: ANSI sequences, carriage-return progress redraws, consecutive repeated lines and valid JSON whitespace.
+- `FANTOM_TOKEN_SAVER=off` leaves request content unchanged.
+- `FANTOM_CODE_MODE=lite|full|ultra` adds a compact coding instruction; default is `off`.
+- Per-request headers: `X-Fantom-Token-Saver` and `X-Fantom-Code-Mode`.
 
-Public aliases can route a client-facing model name to a provider/model pair:
-
-```json
-{
-  "routes": {
-    "fast-model": {
-      "provider": "nvidia",
-      "upstream_model": "meta/actual-model-id"
-    }
-  }
-}
-```
-
-After editing provider configuration, restart:
-
-```bash
-docker compose restart fantom
-```
-
-## Outbound proxy
-
-Fantom uses Go's pooled `net/http` transport with `http.ProxyFromEnvironment`. Set `HTTPS_PROXY` (and optionally `HTTP_PROXY` / `NO_PROXY`) in `.env` for outbound provider traffic. This is separate from Fantom's own public API endpoint.
-
-## Publish to Docker Hub
-
-GitHub Actions builds `linux/amd64` and `linux/arm64` and publishes:
-
-- `monsmain/fantom:latest` on pushes to `main`.
-- `monsmain/fantom:vX.Y.Z` for version tags.
-- `monsmain/fantom:sha-<commit>` for traceable builds.
-
-Configure these GitHub Actions repository secrets:
-
-- `DOCKER_USERNAME` or `DOCKERHUB_USERNAME`: Docker Hub username.
-- `DOCKERHUB_TOKEN`: token with push permission to `monsmain/fantom`.
+This is conservative output cleanup, not a universal tokenizer compressor. Savings vary with tool output and are not guaranteed.
 
 ## Local development
 
 ```bash
 go test ./...
 go vet ./...
-GATEWAY_API_KEY=dev-secret NVIDIA_API_KEY=your-key go run ./cmd/gateway
+GATEWAY_API_KEY=dev-secret FANTOM_DATA_DIR=./data go run ./cmd/gateway
 ```
 
-For the dashboard:
+Dashboard development:
 
 ```bash
 cd dashboard
@@ -187,9 +128,13 @@ npm install
 npm run dev
 ```
 
+## Docker publishing
+
+GitHub Actions builds `linux/amd64` and `linux/arm64` and publishes `monsmain/fantom:latest` on pushes to `main`. Configure repository secrets `DOCKER_USERNAME` (or `DOCKERHUB_USERNAME`) and `DOCKERHUB_TOKEN`.
+
 ## Security
 
-- Replace the sample gateway key before starting.
-- Do not commit `.env` or provider API keys.
-- Keep the default localhost-only bind unless public exposure is intentional.
-- Put TLS termination and a firewall in front of public deployments.
+- Use a long, unique `GATEWAY_API_KEY` and do not share the admin key with client applications.
+- Generated client keys are hashed at rest; provider upstream secrets are stored in the local state file. Protect the mounted volume and its backups.
+- Put public deployments behind HTTPS. Do not expose the container's port without a TLS-terminating proxy.
+- Never commit provider credentials or the Fantom state file.

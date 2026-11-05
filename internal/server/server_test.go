@@ -13,6 +13,7 @@ import (
 )
 
 func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" { t.Errorf("unexpected upstream path: %s", r.URL.Path) }
 		if r.Header.Get("Authorization") != "Bearer upstream-secret" { t.Errorf("upstream authorization header was not set") }
@@ -52,6 +53,7 @@ func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
 }
 
 func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer oc_sk_test" {
 			t.Errorf("OpenCode Console API key not forwarded")
@@ -112,4 +114,104 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 	handler.ServeHTTP(chatResponse, chatRequest)
 	if chatResponse.Code != http.StatusOK { t.Fatalf("chat status = %d, body=%s", chatResponse.Code, chatResponse.Body.String()) }
 	if !strings.Contains(chatResponse.Body.String(), "opencode-chat") { t.Fatalf("unexpected response: %s", chatResponse.Body.String()) }
+}
+
+
+func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	cfg := &config.Config{
+		DefaultProvider: "nvidia",
+		GatewayAPIKeys: []string{"admin-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "safe",
+		DefaultCodeMode: "off",
+		Providers: []config.Provider{{
+			ID: "nvidia", BaseURL: "https://example.invalid/v1", AuthType: "bearer",
+			APIKeys: []string{"upstream-secret"}, Models: []string{"*"}, TimeoutSeconds: 100,
+		}},
+		Routes: map[string]config.Route{},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	call := func(method, path, body, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		if body != "" { req.Header.Set("Content-Type", "application/json") }
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	add := call(http.MethodPost, "/api/admin/providers", `{"id":"custom-openai","base_url":"https://api.example.com/v1","chat_path":"/chat/completions","auth_type":"bearer","api_key":"provider-secret","models":["model-a","model-b"],"timeout_seconds":100}`, "admin-secret")
+	if add.Code != http.StatusOK { t.Fatalf("provider create = %d: %s", add.Code, add.Body.String()) }
+
+	routes := call(http.MethodPut, "/api/admin/routes", `{"routes":{"fast":{"provider":"custom-openai","upstream_model":"model-a"}}}`, "admin-secret")
+	if routes.Code != http.StatusOK { t.Fatalf("route update = %d: %s", routes.Code, routes.Body.String()) }
+
+	models := call(http.MethodGet, "/v1/models", "", "admin-secret")
+	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), "\"fast\"") {
+		t.Fatalf("routed model missing from catalog: %d %s", models.Code, models.Body.String())
+	}
+
+	created := call(http.MethodPost, "/api/admin/keys", `{"name":"CI test key"}`, "admin-secret")
+	if created.Code != http.StatusCreated { t.Fatalf("key create = %d: %s", created.Code, created.Body.String()) }
+	var keyData map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &keyData); err != nil { t.Fatal(err) }
+	clientKey, ok := keyData["key"].(string)
+	if !ok || !strings.HasPrefix(clientKey, "ftm_live_") { t.Fatalf("generated key was not returned once: %#v", keyData) }
+	clientAuth := call(http.MethodGet, "/v1/models", "", clientKey)
+	if clientAuth.Code != http.StatusOK { t.Fatalf("generated client key cannot access model API: %d %s", clientAuth.Code, clientAuth.Body.String()) }
+	adminDenied := call(http.MethodGet, "/api/admin/bootstrap", "", clientKey)
+	if adminDenied.Code != http.StatusUnauthorized { t.Fatalf("generated client key must not access admin API: %d %s", adminDenied.Code, adminDenied.Body.String()) }
+
+	settings := call(http.MethodPut, "/api/admin/settings", `{"default_provider":"custom-openai","token_saver":"safe","code_mode":"full"}`, "admin-secret")
+	if settings.Code != http.StatusOK { t.Fatalf("settings update = %d: %s", settings.Code, settings.Body.String()) }
+
+	removed := call(http.MethodDelete, "/api/admin/providers/custom-openai", "", "admin-secret")
+	if removed.Code != http.StatusOK { t.Fatalf("provider delete = %d: %s", removed.Code, removed.Body.String()) }
+}
+
+
+func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { t.Errorf("decode primary request: %v", err) }
+		if payload["model"] != "primary-model" { t.Errorf("primary model = %#v", payload["model"]) }
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { t.Errorf("decode fallback request: %v", err) }
+		if payload["model"] != "backup-model" { t.Errorf("fallback model = %#v", payload["model"]) }
+		_, _ = io.WriteString(w, `{"id":"fallback-success","choices":[]}`)
+	}))
+	defer fallback.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+		Providers: []config.Provider{
+			{ID:"primary",BaseURL:primary.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"primary-key"},Models:[]string{"primary-model"},TimeoutSeconds:5},
+			{ID:"backup",BaseURL:fallback.URL+"/v1",AuthType:"bearer",APIKeys:[]string{"backup-key"},Models:[]string{"backup-model"},TimeoutSeconds:5},
+		},
+		Routes: map[string]config.Route{
+			"frontdoor": {Provider:"primary",UpstreamModel:"primary-model",FallbackModels:[]string{"backup"}},
+			"backup": {Provider:"backup",UpstreamModel:"backup-model"},
+		},
+	}
+	handler:=New(cfg,slog.New(slog.NewTextHandler(io.Discard,nil)))
+	req:=httptest.NewRequest(http.MethodPost,"/v1/chat/completions",strings.NewReader(`{"model":"frontdoor","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization","Bearer gateway-secret")
+	res:=httptest.NewRecorder()
+	handler.ServeHTTP(res,req)
+	if res.Code!=http.StatusOK { t.Fatalf("fallback response = %d: %s",res.Code,res.Body.String()) }
+	if !strings.Contains(res.Body.String(),"fallback-success") { t.Fatalf("fallback response body = %s",res.Body.String()) }
+	if res.Header().Get("X-Fantom-Selected-Provider")!="backup" { t.Fatalf("selected provider = %q",res.Header().Get("X-Fantom-Selected-Provider")) }
+	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" { t.Fatalf("fallback attempts = %q",res.Header().Get("X-Fantom-Fallback-Attempts")) }
 }

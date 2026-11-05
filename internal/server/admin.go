@@ -1,0 +1,172 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/mojitex/fantom/internal/config"
+)
+
+func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	parts:=strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path,"/api/admin/"),"/"),"/")
+	if len(parts)==1 && parts[0]=="providers" {
+		switch r.Method {
+		case http.MethodGet: s.listProviders(w,r)
+		case http.MethodPost: s.saveProvider(w,r,"")
+		default: methodNotAllowed(w)
+		}
+		return
+	}
+	if len(parts)>=2 && parts[0]=="providers" {
+		id:=parts[1]
+		if len(parts)==3 && parts[2]=="test" && r.Method==http.MethodPost { s.testProvider(w,r,id); return }
+		if len(parts)==2 {
+			switch r.Method {
+			case http.MethodPut, http.MethodPatch: s.saveProvider(w,r,id)
+			case http.MethodDelete:
+				if err:=s.store.deleteProvider(id); err!=nil { adminError(w,http.StatusConflict,err.Error()); return }
+				s.reloadProviderRuntime()
+				writeJSON(w,http.StatusOK,map[string]any{"ok":true})
+			default: methodNotAllowed(w)
+			}
+			return
+		}
+	}
+	if len(parts)==1 {
+		switch parts[0] {
+		case "bootstrap":
+			if r.Method!=http.MethodGet { methodNotAllowed(w); return }
+			state:=s.store.snapshot()
+			writeJSON(w,http.StatusOK,map[string]any{"service":"Fantom","version":"0.2","status":"online","default_provider":state.DefaultProvider,"providers":providerViews(state.Providers),"routes":state.Routes,"settings":map[string]any{"token_saver":state.DefaultTokenSaver,"code_mode":state.DefaultCodeMode},"keys":s.store.listKeys(),"usage":s.usageSummary(state.Requests),"requests":tailRequests(state.Requests,30)})
+			return
+		case "routes":
+			switch r.Method {
+			case http.MethodGet: writeJSON(w,http.StatusOK,map[string]any{"routes":s.store.snapshot().Routes})
+			case http.MethodPut:
+				var body struct { Routes map[string]config.Route `json:"routes"` }
+				if !decodeAdminJSON(w,r,&body) { return }
+				if body.Routes==nil { body.Routes=map[string]config.Route{} }
+				if err:=s.store.setRoutes(body.Routes); err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
+				writeJSON(w,http.StatusOK,map[string]any{"ok":true,"routes":body.Routes})
+			default: methodNotAllowed(w)
+			}
+			return
+		case "keys":
+			switch r.Method {
+			case http.MethodGet: writeJSON(w,http.StatusOK,map[string]any{"keys":s.store.listKeys()})
+			case http.MethodPost:
+				var body struct { Name string `json:"name"` }
+				if !decodeAdminJSON(w,r,&body) { return }
+				if strings.TrimSpace(body.Name)=="" { body.Name="New API key" }
+				created,err:=s.store.createKey(body.Name); if err!=nil { adminError(w,http.StatusInternalServerError,err.Error()); return }
+				writeJSON(w,http.StatusCreated,created)
+			default: methodNotAllowed(w)
+			}
+			return
+		case "settings":
+			switch r.Method {
+			case http.MethodGet:
+				st:=s.store.snapshot(); writeJSON(w,http.StatusOK,map[string]any{"default_provider":st.DefaultProvider,"token_saver":st.DefaultTokenSaver,"code_mode":st.DefaultCodeMode})
+			case http.MethodPut:
+				var body struct { DefaultProvider string `json:"default_provider"`; TokenSaver string `json:"token_saver"`; CodeMode string `json:"code_mode"` }
+				if !decodeAdminJSON(w,r,&body) { return }
+				if err:=s.store.setSettings(body.DefaultProvider,body.TokenSaver,body.CodeMode); err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
+				writeJSON(w,http.StatusOK,map[string]any{"ok":true})
+			default: methodNotAllowed(w)
+			}
+			return
+		case "logs":
+			if r.Method!=http.MethodGet { methodNotAllowed(w); return }
+			st:=s.store.snapshot(); limit:=100
+			if n:=r.URL.Query().Get("limit"); n!="" { var parsed int; if _,err:=fmt.Sscanf(n,"%d",&parsed); err==nil && parsed>0 && parsed<1000 { limit=parsed } }
+			writeJSON(w,http.StatusOK,map[string]any{"requests":tailRequests(st.Requests,limit)})
+			return
+		case "usage":
+			if r.Method!=http.MethodGet { methodNotAllowed(w); return }
+			writeJSON(w,http.StatusOK,s.usageSummary(s.store.snapshot().Requests))
+			return
+		}
+	}
+	if len(parts)==2 && parts[0]=="keys" && r.Method==http.MethodDelete {
+		if err:=s.store.revokeKey(parts[1]); err!=nil { adminError(w,http.StatusNotFound,"API key not found"); return }
+		writeJSON(w,http.StatusOK,map[string]any{"ok":true}); return
+	}
+	adminError(w,http.StatusNotFound,"admin endpoint not found")
+}
+
+func decodeAdminJSON(w http.ResponseWriter,r *http.Request,dst any) bool {
+	r.Body=http.MaxBytesReader(w,r.Body,1<<20)
+	defer r.Body.Close()
+	dec:=json.NewDecoder(r.Body); dec.DisallowUnknownFields()
+	if err:=dec.Decode(dst); err!=nil { adminError(w,http.StatusBadRequest,"invalid JSON: "+err.Error()); return false }
+	return true
+}
+func adminError(w http.ResponseWriter,status int,message string) { writeJSON(w,status,map[string]any{"error":map[string]string{"message":message}}) }
+func methodNotAllowed(w http.ResponseWriter) { adminError(w,http.StatusMethodNotAllowed,"method not allowed") }
+
+func providerViews(items []persistedProvider) []map[string]any {
+	out:=make([]map[string]any,0,len(items))
+	for _,p:=range sortedProviders(items) {
+		preview:=""; if len(p.APIKeys)>0 { last:=p.APIKeys[0]; if len(last)>4 { preview="••••"+last[len(last)-4:] } else { preview="••••" } }
+		out=append(out,map[string]any{"id":p.ID,"base_url":p.BaseURL,"chat_path":p.ChatPath,"models_url":p.ModelsURL,"auth_type":p.AuthType,"models":p.Models,"timeout_seconds":p.TimeoutSeconds,"has_api_key":len(p.APIKeys)>0,"api_key_preview":preview,"model_count":len(p.Models)})
+	}
+	return out
+}
+
+func (s *Server) listProviders(w http.ResponseWriter,r *http.Request) {
+	st:=s.store.snapshot(); writeJSON(w,http.StatusOK,map[string]any{"providers":providerViews(st.Providers),"default_provider":st.DefaultProvider})
+}
+func (s *Server) saveProvider(w http.ResponseWriter,r *http.Request,id string) {
+	var body providerInput
+	if !decodeAdminJSON(w,r,&body) { return }
+	st:=s.store.snapshot()
+	var existing *config.Provider
+	for _,saved:=range st.Providers { p:=saved.runtime(); if p.ID==id || (id=="" && p.ID==strings.ToLower(strings.TrimSpace(body.ID))) { existing=&p; break } }
+	if id!="" { body.ID=id }
+	provider,err:=s.store.appendProviderFromInput(body,existing)
+	if err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
+	if existing!=nil && provider.ID!=existing.ID { adminError(w,http.StatusBadRequest,"provider ID cannot be changed"); return }
+	if err:=s.store.replaceProvider(provider); err!=nil { adminError(w,http.StatusInternalServerError,err.Error()); return }
+	s.reloadProviderRuntime()
+	latest:=s.store.snapshot()
+	for _,item:=range latest.Providers { if item.ID==provider.ID { writeJSON(w,http.StatusOK,map[string]any{"ok":true,"provider":providerViews([]persistedProvider{item})[0]}); return } }
+	adminError(w,http.StatusInternalServerError,"provider saved but could not be reloaded")
+}
+func (s *Server) testProvider(w http.ResponseWriter,r *http.Request,id string) {
+	var target *providerRuntime
+	for _,saved:=range s.store.snapshot().Providers { if saved.ID==id { p:=saved.runtime(); target=newProviderRuntime(p); break } }
+	if target==nil { adminError(w,http.StatusNotFound,"provider not found"); return }
+	modelsURL:=target.config.ModelsURL
+	if modelsURL=="" { modelsURL=target.config.BaseURL+"/models" }
+	req,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,modelsURL,nil)
+	if err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
+	key:=target.apiKey(); s.applyProviderHeaders(req,target,key)
+	resp,err:=target.client.Do(req)
+	if err!=nil { writeJSON(w,http.StatusOK,map[string]any{"ok":false,"provider":id,"error":err.Error()}); return }
+	defer resp.Body.Close()
+	_,_=io.Copy(io.Discard,io.LimitReader(resp.Body,2<<20))
+	writeJSON(w,http.StatusOK,map[string]any{"ok":resp.StatusCode>=200&&resp.StatusCode<300,"provider":id,"http_status":resp.StatusCode,"message":http.StatusText(resp.StatusCode),"tested_at":time.Now().UTC()})
+}
+func tailRequests(items []requestRecord,limit int) []requestRecord {
+	if limit>len(items) { limit=len(items) }
+	out:=append([]requestRecord(nil),items[len(items)-limit:]...)
+	sort.Slice(out,func(i,j int)bool{return out[i].At.After(out[j].At)})
+	return out
+}
+func (s *Server) usageSummary(items []requestRecord) map[string]any {
+	var total,success,failed int
+	var latency int64
+	providers:=map[string]int{}
+	models:=map[string]int{}
+	for _,item:=range items { total++; latency+=item.LatencyMS; providers[item.Provider]++; models[item.Model]++; if item.Status>=200&&item.Status<400 { success++ } else { failed++ } }
+	avg:=int64(0); if total>0 { avg=latency/int64(total) }
+	return map[string]any{"total_requests":total,"successful_requests":success,"failed_requests":failed,"avg_latency_ms":avg,"by_provider":providers,"by_model":models}
+}
+
+var _ = errors.New
