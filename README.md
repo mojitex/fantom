@@ -8,7 +8,7 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 ## What is in this release
 
 ### Control plane
-- A multi-page dark operations dashboard: Command Center, Providers, Model Catalog, Routing & Aliases, API Keys, Usage, Request Logs and Settings.
+- A focused dashboard with four primary destinations: Endpoint & Key, Providers, Combos and Usage. Searchable model discovery lives inside Providers; the full request explorer lives inside Usage; Settings stays in the sidebar footer.
 - Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
 - Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider; requests rotate through the pool and retry another credential after authentication, rate-limit and transient upstream failures.
 - Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases are attempted only for classified transient/authentication/billing responses.
