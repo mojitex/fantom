@@ -72,3 +72,18 @@ func TestCompatibilityForProviderSkipsWildcardWithoutResolvedModels(t *testing.T
 		t.Fatal("provider with an unresolved wildcard catalog must not publish an empty model group")
 	}
 }
+
+
+func TestEngineModelForProviderUsesNamespacedMapping(t *testing.T) {
+	engine := &Engine{managedModels: map[string]map[string]string{
+		"opencode-console": {
+			"kimi-k3": "fantom-opencode-abc123/kimi-k3",
+		},
+	}}
+	if got := engine.ModelForProvider("OpenCode-Console", "kimi-k3"); got != "fantom-opencode-abc123/kimi-k3" {
+		t.Fatalf("ModelForProvider() = %q", got)
+	}
+	if got := engine.ModelForProvider("missing", "kimi-k3"); got != "" {
+		t.Fatalf("unknown provider mapping = %q, want empty", got)
+	}
+}

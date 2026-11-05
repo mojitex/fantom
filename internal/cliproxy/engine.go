@@ -296,7 +296,7 @@ func (e *Engine) ModelForProvider(providerID, model string) string {
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.managedModels[strings.TrimSpace(providerID)][strings.TrimSpace(model)]
+	return e.managedModels[strings.ToLower(strings.TrimSpace(providerID))][strings.TrimSpace(model)]
 }
 
 // Models returns the embedded runtime's catalog with a short cache to keep model

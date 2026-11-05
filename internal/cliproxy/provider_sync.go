@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	fantomconfig "github.com/mojitex/fantom/internal/config"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -150,7 +151,7 @@ func (e *Engine) SyncProviders(providers []fantomconfig.Provider) error {
 				models[model.Name] = entry.Prefix + "/" + model.Name
 			}
 		}
-		managedModels[provider.ID] = models
+		managedModels[strings.ToLower(strings.TrimSpace(provider.ID))] = models
 	}
 	sort.Slice(managed, func(i, j int) bool { return managed[i].Name < managed[j].Name })
 	cfg.OpenAICompatibility = append(preserved, managed...)
