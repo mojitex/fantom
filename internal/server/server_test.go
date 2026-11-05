@@ -215,3 +215,11 @@ func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
 	if res.Header().Get("X-Fantom-Selected-Provider")!="backup" { t.Fatalf("selected provider = %q",res.Header().Get("X-Fantom-Selected-Provider")) }
 	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" { t.Fatalf("fallback attempts = %q",res.Header().Get("X-Fantom-Fallback-Attempts")) }
 }
+
+
+func TestProviderRuntimeRotatesUpstreamKeysRoundRobin(t *testing.T) {
+	provider := &providerRuntime{config:config.Provider{APIKeys:[]string{"key-a","key-b"}}}
+	got:=[]string{provider.apiKey(),provider.apiKey(),provider.apiKey(),provider.apiKey()}
+	want:=[]string{"key-a","key-b","key-a","key-b"}
+	for i:=range want { if got[i]!=want[i] { t.Fatalf("key rotation = %#v, want %#v",got,want) } }
+}
