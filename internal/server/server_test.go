@@ -56,6 +56,9 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer oc_sk_test" {
 			t.Errorf("OpenCode Console API key not forwarded")
 		}
+		if r.Header.Get("x-opencode-session") != "ses_test_conversation" && r.URL.Path == "/inference/openai/v1/chat/completions" {
+			t.Errorf("stable OpenCode session not forwarded")
+		}
 		switch r.URL.Path {
 		case "/inference/v1/models":
 			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"kimi-k3"},{"id":"some-free-model"}]}`)
@@ -80,8 +83,8 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 		MaxRequestBytes: 1 << 20,
 		Providers: []config.Provider{{
 			ID: "opencode-console",
-			BaseURL: upstream.URL + "/inference/openai/v1",
-			ChatPath: "/chat/completions",
+			BaseURL: upstream.URL + "/inference",
+			ChatPath: "/openai/v1/chat/completions",
 			ModelsURL: upstream.URL + "/inference/v1/models",
 			AuthType: "bearer",
 			APIKeys: []string{"oc_sk_test"},
@@ -104,6 +107,7 @@ func TestOpenCodeConsoleUsesItsOwnChatAndModelsURLs(t *testing.T) {
 	chatRequest.Header.Set("Authorization", "Bearer gateway-secret")
 	chatRequest.Header.Set("X-Fantom-Token-Saver", "off")
 	chatRequest.Header.Set("X-Fantom-Code-Mode", "full")
+	chatRequest.Header.Set("X-OpenCode-Session", "ses_test_conversation")
 	chatResponse := httptest.NewRecorder()
 	handler.ServeHTTP(chatResponse, chatRequest)
 	if chatResponse.Code != http.StatusOK { t.Fatalf("chat status = %d, body=%s", chatResponse.Code, chatResponse.Body.String()) }

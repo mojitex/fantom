@@ -244,7 +244,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		codeMode = s.config.DefaultCodeMode
 	}
 	body, optimizationStats := optimizer.Apply(body, saverMode, codeMode)
-	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe", "balanced"))
+	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe"))
 	w.Header().Set("X-Fantom-Code-Mode", normalizedMode(codeMode, "lite", "full", "ultra"))
 	if optimizationStats.ToolResultsChanged > 0 {
 		w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
@@ -261,6 +261,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if accept == "" { accept = "application/json" }
 	upstreamRequest.Header.Set("Accept", accept)
 	upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
+	// OpenCode Console uses this stable value to keep conversation routing and prompt caching consistent.
+	if provider.config.ID == "opencode-console" {
+		if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
+		upstreamRequest.Header.Set("x-opencode-session", session)
+		}
+	}
 	s.applyProviderHeaders(upstreamRequest, provider, key)
 
 	response, err := provider.client.Do(upstreamRequest)

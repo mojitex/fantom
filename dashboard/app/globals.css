@@ -14,3 +14,17 @@ h1{margin:25px 0 18px;font-size:clamp(54px,9vw,100px);line-height:.99;letter-spa
 .code-block{border:1px solid var(--line);background:#07090b;overflow:hidden}.code-top{display:flex;justify-content:space-between;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line);font-size:9px}.code-top span:last-child{color:var(--accent)}pre{margin:0;padding:20px;overflow-x:auto;color:#d9e6d0;font:12px/1.8 var(--mono)}.footnote{color:var(--muted);font-size:11px;line-height:1.7}code{color:var(--accent);font-family:var(--mono)}
 .footer{min-height:80px;display:flex;justify-content:space-between;align-items:center;gap:16px;font-size:9px}
 @media(max-width:640px){.shell{width:min(100% - 30px,1040px)}.topbar{height:68px}.topbar-label{font-size:8px}.hero{padding:65px 0 48px}.hero-meta{display:grid;grid-template-columns:1fr 1fr;gap:24px}.status-grid{grid-template-columns:1fr}.status-cell{min-height:72px}.status-cell+.status-cell{border-left:0;border-top:1px solid var(--line)}.section-heading{align-items:flex-start}.key-row{flex-direction:column}.key-row button{width:100%}.footer{align-items:flex-start;justify-content:center;flex-direction:column;padding:24px 0}}
+
+
+/* Provider and optimization sections */
+.provider-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.provider-card{display:flex;align-items:center;gap:14px;padding:18px;border:1px solid var(--line);background:rgba(16,20,25,.7);min-width:0}
+.provider-mark{display:grid;place-items:center;flex:0 0 38px;width:38px;height:38px;border-radius:10px;font:700 12px var(--mono)}
+.provider-mark.nvidia{color:#b7f36b;background:rgba(183,243,107,.12)}
+.provider-mark.opencode{color:#f0a27e;background:rgba(232,112,64,.13)}
+.provider-card div,.optimizer-row div{display:grid;gap:6px;min-width:0}
+.provider-card strong,.optimizer-row strong{font-size:12px}
+.provider-card span:last-child,.optimizer-row span{color:var(--muted);font-size:11px;line-height:1.5}
+.optimizer-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:15px 0;border-top:1px solid var(--line)}
+.optimizer-row code{font-size:10px;white-space:nowrap}
+@media(max-width:640px){.provider-grid{grid-template-columns:1fr}.optimizer-row{align-items:flex-start;flex-direction:column;gap:8px}}
