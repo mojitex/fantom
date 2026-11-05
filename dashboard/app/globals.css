@@ -94,3 +94,51 @@
 .model-filters{display:grid;grid-template-columns:minmax(220px,1fr) minmax(180px,260px);gap:9px;padding:0 17px 13px}
 .model-filters input,.model-filters select{min-width:0;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font-size:11px}
 @media(max-width:520px){.model-filters{grid-template-columns:1fr}}
+
+
+/* Secondary tools stay inside their owning workflow instead of adding sidebar destinations. */
+.inline-tool-details {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #101620;
+  overflow: hidden;
+}
+.inline-tool-details > summary {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 15px;
+  cursor: pointer;
+  list-style: none;
+  color: #c5cde0;
+  font-size: 11px;
+  font-weight: 600;
+}
+.inline-tool-details > summary::-webkit-details-marker { display: none; }
+.inline-tool-details > summary::after {
+  content: "+";
+  margin-left: auto;
+  color: var(--purple);
+  font: 15px var(--mono);
+}
+.inline-tool-details[open] > summary::after { content: "−"; }
+.inline-tool-details > summary span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+}
+.inline-tool-details > .panel {
+  margin: 0 10px 10px;
+}
+.request-explorer .panel-toolbar {
+  border-top: 1px solid var(--line);
+}
+@media (max-width: 680px) {
+  .inline-tool-details > summary {
+    min-height: 44px;
+    padding: 0 11px;
+    font-size: 10px;
+  }
+}
