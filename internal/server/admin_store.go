@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -47,13 +48,16 @@ type storedClientKey struct {
 }
 
 type requestRecord struct {
-	ID        string    `json:"id"`
-	At        time.Time `json:"at"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Status    int       `json:"status"`
-	LatencyMS int64     `json:"latency_ms"`
-	Streaming bool      `json:"streaming"`
+	ID               string    `json:"id"`
+	At               time.Time `json:"at"`
+	Provider         string    `json:"provider"`
+	Model            string    `json:"model"`
+	Status           int       `json:"status"`
+	LatencyMS        int64     `json:"latency_ms"`
+	Streaming        bool      `json:"streaming"`
+	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64     `json:"completion_tokens,omitempty"`
+	TotalTokens      int64     `json:"total_tokens,omitempty"`
 }
 
 type adminState struct {
@@ -68,16 +72,22 @@ type adminState struct {
 }
 
 type adminStore struct {
-	mu   sync.RWMutex
-	path string
-	data adminState
+	mu        sync.RWMutex
+	path      string
+	data      adminState
+	dirty     bool
+	flushWake chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+	logger    *slog.Logger
 }
 
-func newAdminStore(cfg *config.Config) (*adminStore, error) {
+func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error) {
 	dir := strings.TrimSpace(os.Getenv("FANTOM_DATA_DIR"))
 	if dir == "" { dir = "./data" }
 	path := filepath.Join(dir, "fantom-state.json")
-	store := &adminStore{path:path}
+	store := &adminStore{path:path, logger:logger}
 	store.data = adminState{Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes, DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode}
 	for _, p := range cfg.Providers { store.data.Providers = append(store.data.Providers, persistProvider(p)) }
 	if store.data.Routes == nil { store.data.Routes = map[string]config.Route{} }
@@ -94,6 +104,10 @@ func newAdminStore(cfg *config.Config) (*adminStore, error) {
 		store.data = loaded
 	} else if !errors.Is(err, os.ErrNotExist) { return nil, fmt.Errorf("read Fantom state: %w", err) }
 	if err := store.saveLocked(); err != nil { return nil, err }
+	store.flushWake = make(chan struct{}, 1)
+	store.stop = make(chan struct{})
+	store.done = make(chan struct{})
+	go store.runPersistence()
 	return store, nil
 }
 
@@ -104,6 +118,7 @@ func (d *adminStore) saveLocked() error {
 	tmp := d.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0600); err != nil { return fmt.Errorf("write state: %w",err) }
 	if err := os.Rename(tmp, d.path); err != nil { _ = os.Remove(tmp); return fmt.Errorf("commit state: %w",err) }
+	d.dirty = false
 	return nil
 }
 
@@ -166,10 +181,74 @@ func (d *adminStore) setSettings(defaultProvider, saver, code string) error {
 	return d.saveLocked()
 }
 func (d *adminStore) appendRequest(row requestRecord) {
-	d.mu.Lock(); defer d.mu.Unlock()
-	d.data.Requests=append(d.data.Requests,row)
-	if len(d.data.Requests)>5000 { d.data.Requests=append([]requestRecord(nil),d.data.Requests[len(d.data.Requests)-5000:]...) }
-	_ = d.saveLocked()
+	d.mu.Lock()
+	d.data.Requests = append(d.data.Requests, row)
+	if len(d.data.Requests) > 5000 {
+		d.data.Requests = append([]requestRecord(nil), d.data.Requests[len(d.data.Requests)-5000:]...)
+	}
+	d.dirty = true
+	d.mu.Unlock()
+
+	// Request logging must not put a synchronous disk write on the inference path.
+	// The worker coalesces bursts and flushes at most once per second.
+	if d.flushWake != nil {
+		select {
+		case d.flushWake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (d *adminStore) runPersistence() {
+	defer close(d.done)
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	for {
+		select {
+		case <-d.flushWake:
+			if timer == nil {
+				timer = time.NewTimer(time.Second)
+			} else {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(time.Second)
+			}
+			timerC = timer.C
+		case <-timerC:
+			d.flushRequests()
+			timer = nil
+			timerC = nil
+		case <-d.stop:
+			if timer != nil {
+				timer.Stop()
+			}
+			d.flushRequests()
+			return
+		}
+	}
+}
+
+func (d *adminStore) flushRequests() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.dirty {
+		return
+	}
+	if err := d.saveLocked(); err != nil && d.logger != nil {
+		d.logger.Error("could not persist request history batch", "error", err)
+	}
+}
+
+func (d *adminStore) Close() {
+	if d.stop == nil {
+		return
+	}
+	d.closeOnce.Do(func() { close(d.stop) })
+	<-d.done
 }
 func (d *adminStore) keyValid(key string) bool {
 	hash:=sha256.Sum256([]byte(key)); encoded:=hex.EncodeToString(hash[:])
