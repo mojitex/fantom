@@ -481,3 +481,15 @@ func TestProviderCooldownMarksDuplicateConfiguredKeys(t *testing.T) {
 		t.Fatalf("duplicate credential entries were not cooled together: %#v", got)
 	}
 }
+
+
+func TestProviderKeyPoolDoesNotRetryDuplicateSecretTwice(t *testing.T) {
+	provider := &providerRuntime{config: config.Provider{APIKeys: []string{"same-key", "same-key", "other-key"}}}
+	got := provider.apiKeysForRequest()
+	if len(got) != 2 {
+		t.Fatalf("unique credential candidates = %#v, want two unique keys", got)
+	}
+	if got[0] == got[1] {
+		t.Fatalf("duplicate secret was scheduled twice: %#v", got)
+	}
+}
