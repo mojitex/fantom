@@ -194,7 +194,6 @@ func (s *Server) testProvider(w http.ResponseWriter,r *http.Request,id string) {
 	payload,_:=json.Marshal(map[string]any{
 		"model":model,
 		"messages":[]map[string]string{{"role":"user","content":"Reply with OK."}},
-		"max_tokens":8,
 		"stream":false,
 	})
 	started:=time.Now()
