@@ -142,6 +142,7 @@ Request history is written in coalesced batches rather than synchronously on eve
 ## Local development
 
 ```bash
+go mod tidy
 go test ./...
 go vet ./...
 GATEWAY_API_KEY=dev-secret FANTOM_DATA_DIR=./data go run ./cmd/gateway

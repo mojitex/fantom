@@ -8,13 +8,11 @@ RUN npm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS gateway-builder
 WORKDIR /src
-COPY go.mod ./
-RUN go mod download
 COPY . .
 COPY --from=dashboard-builder /dashboard/out ./dashboard/out
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w" -o /out/fantom ./cmd/gateway
+RUN go mod tidy && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w" -o /out/fantom ./cmd/gateway
 
 FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates \
