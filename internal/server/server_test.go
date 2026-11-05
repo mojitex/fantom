@@ -159,8 +159,10 @@ func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &keyData); err != nil { t.Fatal(err) }
 	clientKey, ok := keyData["key"].(string)
 	if !ok || !strings.HasPrefix(clientKey, "ftm_live_") { t.Fatalf("generated key was not returned once: %#v", keyData) }
-	keyAuth := call(http.MethodGet, "/api/admin/bootstrap", "", clientKey)
-	if keyAuth.Code != http.StatusOK { t.Fatalf("generated key cannot authenticate: %d %s", keyAuth.Code, keyAuth.Body.String()) }
+	clientAuth := call(http.MethodGet, "/v1/models", "", clientKey)
+	if clientAuth.Code != http.StatusOK { t.Fatalf("generated client key cannot access model API: %d %s", clientAuth.Code, clientAuth.Body.String()) }
+	adminDenied := call(http.MethodGet, "/api/admin/bootstrap", "", clientKey)
+	if adminDenied.Code != http.StatusUnauthorized { t.Fatalf("generated client key must not access admin API: %d %s", adminDenied.Code, adminDenied.Body.String()) }
 
 	settings := call(http.MethodPut, "/api/admin/settings", `{"default_provider":"custom-openai","token_saver":"safe","code_mode":"full"}`, "admin-secret")
 	if settings.Code != http.StatusOK { t.Fatalf("settings update = %d: %s", settings.Code, settings.Body.String()) }
