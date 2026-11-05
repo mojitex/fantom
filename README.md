@@ -8,12 +8,12 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 ## What is in this release
 
 ### Control plane
-- A multi-page dark operations dashboard: Command Center, Providers, Model Catalog, Routing & Aliases, API Keys, Usage, Request Logs and Settings.
+- A focused dark dashboard with four primary sections: Endpoint & Key, Providers, Combos and Usage; Settings stays out of the main navigation.
 - Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
-- Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider and are selected round-robin for upstream calls.
+- Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider, selected round-robin, and retried on retryable upstream failures (up to three keys per model candidate).
 - Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases retry on authentication, rate-limit, timeout and transient 5xx responses.
 - Generate and revoke client API keys. Generated keys are only displayed once and stored as SHA-256 hashes.
-- Request history and basic provider/model/latency aggregates (last 5,000 requests).
+- Request history and provider/model/latency aggregates for the last 5,000 requests. Request history writes are batched off the inference path and flushed on graceful shutdown.
 - Default provider, token saver and code-mode settings are stored persistently.
 
 ### Gateway runtime
@@ -21,14 +21,14 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 - NVIDIA NIM and OpenCode Console are preconfigured; more OpenAI-compatible providers can be added from the dashboard.
 - Provider-specific chat paths and model-catalog URLs.
 - Multiple upstream NVIDIA keys, round-robin key selection, pooled HTTP connections, HTTP/2 and incremental SSE forwarding.
-- 100-second default response-header timeout; configurable per provider.
+- 100-second default response-header timeout; configurable per provider. Streaming bodies are not cut off by a fixed total-response timer.
 - Optional outbound HTTP/HTTPS proxy.
 - Safe command-tool output normalization and optional compact code-mode instructions.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
 
 ## Important scope and compatibility notes
 
-This is a much more capable control plane than the original starter page, but it is not yet a feature-for-feature clone of 9Router or OmniRoute. In particular, this build does **not** yet include OAuth/device-code onboarding, multi-account quota-aware selection, combo/fallback chains, cross-protocol Claude/Gemini/Responses translation, billing/pricing calculations, or provider token-refresh workflows. The request analytics currently records status, provider, model and elapsed time; it does not claim provider-reported token usage when the upstream does not return it.
+Fantom is not yet a feature-for-feature clone of 9Router or OmniRoute. It currently supports OpenAI-compatible Chat Completions, model aliases, ordered fallback chains and retrying a provider's API-key pool. It does **not** yet include OAuth/device-code onboarding, quota-aware multi-account selection, native Claude/Gemini/OpenAI Responses translation, provider token-refresh workflows or price-based billing. Usage analytics records prompt, completion and total tokens when the upstream reports them; providers that omit usage data are shown without token counts. The dashboard retains the most recent 5,000 requests, so these totals are rolling history rather than lifetime billing records.
 
 The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode free-tier restrictions are not bypassed; use supported Console/Go API access. Add compatible endpoints from the Providers page.
 
@@ -47,7 +47,7 @@ The initial provider catalog contains NVIDIA NIM and OpenCode Console. OpenCode 
    | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
    | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
 
-4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Without a persistent volume, the container filesystem can be reset by a redeploy.
+4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves providers, secrets, aliases, generated key hashes and request logs across redeploys. Request-history writes are coalesced for up to about one second to keep disk I/O off the inference path; graceful shutdown flushes the pending batch. A hard process or host crash can lose the most recent unflushed request records. Without a persistent volume, the container filesystem can be reset by a redeploy.
 5. Open the generated Railway domain. Sign in with `GATEWAY_API_KEY`.
 
 For a self-hosted Docker deployment, `compose.yaml` creates a named `fantom-data` volume automatically.
@@ -67,7 +67,7 @@ curl https://YOUR-DOMAIN/v1/chat/completions \
   }'
 ```
 
-The same key is accepted by protected `/v1/*` and `/api/admin/*` endpoints. Use generated client keys for applications; reserve the environment key for administration.
+Use generated client keys for application traffic on `/v1/*`. Management routes under `/api/admin/*` require the environment-level `GATEWAY_API_KEY`; generated client keys cannot administer the gateway.
 
 ## Admin API
 
@@ -82,8 +82,8 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
 | DELETE | `/api/admin/keys/{id}` | Revoke a generated key |
-| GET | `/api/admin/usage` | Aggregated request metrics |
-| GET | `/api/admin/logs` | Recent request history |
+| GET | `/api/admin/usage` | Aggregated request and provider-reported token metrics |
+| GET | `/api/admin/logs` | Recent request history, including reported token usage when available |
 | GET / PUT | `/api/admin/settings` | Default provider and optimization settings |
 
 ### Provider payload
@@ -101,7 +101,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 }
 ```
 
-Use `models: ["*"]` to expose all models returned by the provider's model endpoint, or list explicit model IDs. Credentials are saved to the protected state file and redacted from dashboard responses. Use `api_key` for a single credential or `api_keys` for a round-robin pool.
+Use `models: ["*"]` to expose all models returned by the provider's model endpoint, or list explicit model IDs. Credentials are saved to the protected state file and redacted from dashboard responses. Use `api_key` for a single credential or `api_keys` for a round-robin pool. When an upstream key receives a retryable HTTP status or a connection error, Fantom tries another key from the same pool (up to three key attempts) before advancing to the next configured fallback alias.
 
 ## Token saver
 
@@ -110,7 +110,7 @@ Use `models: ["*"]` to expose all models returned by the provider's model endpoi
 - `FANTOM_CODE_MODE=lite|full|ultra` adds a compact coding instruction; default is `off`.
 - Per-request headers: `X-Fantom-Token-Saver` and `X-Fantom-Code-Mode`.
 
-This is conservative output cleanup, not a universal tokenizer compressor. Savings vary with tool output and are not guaranteed.
+This is conservative output cleanup, not a universal tokenizer compressor. Savings vary with tool output and are not guaranteed. Usage reports only provider-returned token counts; it does not estimate billing cost.
 
 ## Local development
 
