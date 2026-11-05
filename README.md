@@ -11,7 +11,7 @@ Fantom is a self-hosted AI gateway with a Go routing runtime and a Next.js contr
 - A multi-page dark operations dashboard: Command Center, Providers, Model Catalog, Routing & Aliases, API Keys, Usage, Request Logs and Settings.
 - Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
 - Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API.
-- Model aliases map a stable client-facing ID to an upstream provider and model.
+- Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases retry on authentication, rate-limit, timeout and transient 5xx responses.
 - Generate and revoke client API keys. Generated keys are only displayed once and stored as SHA-256 hashes.
 - Request history and basic provider/model/latency aggregates (last 5,000 requests).
 - Default provider, token saver and code-mode settings are stored persistently.
@@ -79,7 +79,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | GET / POST | `/api/admin/providers` | List or add providers |
 | PUT / DELETE | `/api/admin/providers/{id}` | Update or remove a provider |
 | POST | `/api/admin/providers/{id}/test` | Test provider model-catalog connectivity |
-| GET / PUT | `/api/admin/routes` | Read or replace model aliases |
+| GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
 | DELETE | `/api/admin/keys/{id}` | Revoke a generated key |
 | GET | `/api/admin/usage` | Aggregated request metrics |
