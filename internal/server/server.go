@@ -187,10 +187,10 @@ func appendModel(items *[]modelItem, seen map[string]struct{}, item modelItem) {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	started:=time.Now()
-	recorder:=&statusRecorder{ResponseWriter:w,status:http.StatusOK}
+	recorder:=&statusRecorder{ResponseWriter:w}
 	w=recorder
 	record:=requestRecord{ID:r.Header.Get("X-Request-ID"),At:started.UTC()}
-	defer func(){ record.Status=recorder.status; record.LatencyMS=time.Since(started).Milliseconds(); if s.store!=nil { s.store.appendRequest(record) } }()
+	defer func(){ if recorder.status==0 { recorder.status=http.StatusOK }; record.Status=recorder.status; record.LatencyMS=time.Since(started).Milliseconds(); if s.store!=nil { s.store.appendRequest(record) } }()
 	maxBytes:=s.config.MaxRequestBytes; if maxBytes<=0 { maxBytes=32<<20 }
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	body, err := io.ReadAll(r.Body)
@@ -355,7 +355,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 
 type statusRecorder struct { http.ResponseWriter; status int }
-func (w *statusRecorder) WriteHeader(code int) { if w.status!=http.StatusOK { return }; w.status=code; w.ResponseWriter.WriteHeader(code) }
-func (w *statusRecorder) Write(p []byte) (int,error) { if w.status==http.StatusOK { w.WriteHeader(http.StatusOK) }; return w.ResponseWriter.Write(p) }
-func (w *statusRecorder) Flush() { if w.status==http.StatusOK { w.WriteHeader(http.StatusOK) }; if f,ok:=w.ResponseWriter.(http.Flusher); ok { f.Flush() } }
+func (w *statusRecorder) WriteHeader(code int) { if w.status!=0 { return }; w.status=code; w.ResponseWriter.WriteHeader(code) }
+func (w *statusRecorder) Write(p []byte) (int,error) { if w.status==0 { w.WriteHeader(http.StatusOK) }; return w.ResponseWriter.Write(p) }
+func (w *statusRecorder) Flush() { if w.status==0 { w.WriteHeader(http.StatusOK) }; if f,ok:=w.ResponseWriter.(http.Flusher); ok { f.Flush() } }
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
