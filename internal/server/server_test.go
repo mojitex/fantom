@@ -223,3 +223,13 @@ func TestProviderRuntimeRotatesUpstreamKeysRoundRobin(t *testing.T) {
 	want:=[]string{"key-a","key-b","key-a","key-b"}
 	for i:=range want { if got[i]!=want[i] { t.Fatalf("key rotation = %#v, want %#v",got,want) } }
 }
+
+
+func TestFallbackEligibleStatuses(t *testing.T) {
+	for _,status:=range []int{http.StatusUnauthorized,http.StatusForbidden,http.StatusRequestTimeout,http.StatusConflict,425,http.StatusTooManyRequests,http.StatusInternalServerError,http.StatusBadGateway,http.StatusServiceUnavailable,http.StatusGatewayTimeout} {
+		if !shouldFallback(status) { t.Errorf("status %d should allow fallback",status) }
+	}
+	for _,status:=range []int{http.StatusBadRequest,http.StatusNotFound,http.StatusUnprocessableEntity,http.StatusInternalServerError+1} {
+		if shouldFallback(status) { t.Errorf("status %d should not allow fallback",status) }
+	}
+}
