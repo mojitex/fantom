@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	cliproxyengine "github.com/mojitex/fantom/internal/cliproxy"
 )

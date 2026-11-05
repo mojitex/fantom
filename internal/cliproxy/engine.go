@@ -36,7 +36,9 @@ type Engine struct {
 	service    *cliproxy.Service
 	cancel     context.CancelFunc
 	apiKey     string
+	configPath string
 	baseURL    *url.URL
+	syncMu     sync.Mutex
 	apiProxy   *httputil.ReverseProxy
 	adminProxy *httputil.ReverseProxy
 	client     *http.Client
@@ -198,6 +200,7 @@ func New(adminKey string) (*Engine, error) {
 	return &Engine{
 		service: service,
 		apiKey: internalKey,
+		configPath: configPath,
 		baseURL: target,
 		apiProxy: apiProxy,
 		adminProxy: adminProxy,

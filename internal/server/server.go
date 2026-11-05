@@ -363,7 +363,7 @@ func (s *Server) providerModels(ctx context.Context, provider *providerRuntime) 
 	defer provider.catalogMu.Unlock()
 
 	const catalogTTL = 45 * time.Second
-	if len(provider.catalogModels)>0 && time.Since(provider.catalogFetchedAt)<catalogTTL {
+	if !provider.catalogFetchedAt.IsZero() && time.Since(provider.catalogFetchedAt)<catalogTTL {
 		return append([]string(nil),provider.catalogModels...)
 	}
 
