@@ -53,3 +53,21 @@ func TestCompatibilityForProviderAllowsNoAuthAndSkipsNonstandardChatPath(t *test
 	if err != nil { t.Fatalf("nonstandard path mapping error = %v", err) }
 	if include { t.Fatal("provider with a non-OpenAI chat path must remain on the legacy plane") }
 }
+
+
+func TestCompatibilityForProviderSkipsWildcardWithoutResolvedModels(t *testing.T) {
+	provider := fantomconfig.Provider{
+		ID: "wildcard-only",
+		BaseURL: "https://api.example.com/v1",
+		ChatPath: "/chat/completions",
+		AuthType: "none",
+		Models: []string{"*"},
+	}
+	_, include, err := compatibilityForProvider(provider)
+	if err != nil {
+		t.Fatalf("compatibilityForProvider() error = %v", err)
+	}
+	if include {
+		t.Fatal("provider with an unresolved wildcard catalog must not publish an empty model group")
+	}
+}

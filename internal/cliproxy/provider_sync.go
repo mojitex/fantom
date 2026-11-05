@@ -61,6 +61,11 @@ func compatibilityForProvider(provider fantomconfig.Provider) (sdkconfig.OpenAIC
 			headers[name] = value
 		}
 	}
+	if len(models) == 0 {
+		// A wildcard provider whose catalog is temporarily empty stays on the
+		// legacy Fantom route instead of publishing an empty SDK model group.
+		return sdkconfig.OpenAICompatibility{}, false, nil
+	}
 	if len(headers) == 0 {
 		headers = nil
 	}

@@ -173,3 +173,28 @@
 .account-actions .ghost{width:27px;height:27px;display:grid;place-items:center;padding:0}
 .account-bulk-actions{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;line-height:1.5}
 @media(max-width:760px){.account-connect-controls{max-width:none}.account-bulk-actions{align-items:flex-start;flex-direction:column}.account-actions{flex-wrap:wrap}}
+
+.oauth-manual-callback{display:grid;gap:7px;flex:1 1 100%;min-width:0}
+.oauth-manual-callback label{font:8px var(--mono);color:var(--dim);letter-spacing:.08em}
+.oauth-redirect-input{width:100%;min-height:56px;padding:9px 10px;resize:vertical;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font:9px/1.5 var(--mono)}
+.oauth-redirect-input:focus{outline:1px solid #7162bd;border-color:#7162bd}
+
+
+/* Advanced runtime routing controls */
+.core-routing-settings{display:grid;gap:12px;margin-top:14px}
+.core-routing-settings .page-heading.compact{margin:0 0 2px;align-items:center}
+.core-routing-settings .page-heading.compact h2{font-size:15px;margin:4px 0}
+.core-routing-settings .page-heading.compact p{font-size:10px;margin:0}
+.core-routing-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.core-routing-grid .settings-panel{display:grid;align-content:start;gap:9px;padding:16px}
+.core-routing-grid .settings-panel>label{margin-top:3px}
+.core-routing-grid .settings-panel>select,
+.core-routing-grid .settings-panel>input{width:100%;min-height:36px;padding:0 10px;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font-size:10px}
+.core-routing-grid .settings-panel>input[type="number"]{font-family:var(--mono)}
+.setting-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid var(--line)}
+.setting-toggle>div{display:grid;gap:4px}
+.setting-toggle b{font-size:10px;color:var(--text)}
+.setting-toggle span{max-width:420px;color:var(--muted);font-size:9px;line-height:1.5}
+.setting-toggle input{width:16px;height:16px;accent-color:#8b7cf6}
+.field-hint{font:8px var(--mono);color:var(--dim);letter-spacing:0;text-transform:none}
+@media(max-width:900px){.core-routing-grid{grid-template-columns:1fr}}
