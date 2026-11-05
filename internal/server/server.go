@@ -69,7 +69,7 @@ func New(cfg *config.Config, logger *slog.Logger) http.Handler {
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("/api/admin/", s.authenticate(s.handleAdmin))
+	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
 	mux.HandleFunc("/", s.handleDashboard)
@@ -107,25 +107,44 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 	})
 }
 
+func bearerToken(r *http.Request) (string, bool) {
+	value:=strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix="Bearer "
+	if !strings.HasPrefix(value,prefix) { return "",false }
+	return strings.TrimSpace(strings.TrimPrefix(value,prefix)),true
+}
+
+func (s *Server) environmentKeyValid(provided string) bool {
+	valid:=0
+	for _,key:=range s.config.GatewayAPIKeys {
+		if subtle.ConstantTimeCompare([]byte(provided),[]byte(key))==1 { valid=1 }
+	}
+	return valid==1
+}
+
 func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		value := strings.TrimSpace(r.Header.Get("Authorization"))
-		const prefix = "Bearer "
-		if !strings.HasPrefix(value, prefix) {
-			writeAPIError(w, http.StatusUnauthorized, "missing or invalid bearer token", "authentication_error")
+	return func(w http.ResponseWriter,r *http.Request) {
+		provided,ok:=bearerToken(r)
+		valid:=ok && s.environmentKeyValid(provided)
+		if ok && !valid && s.store!=nil { valid=s.store.keyValid(provided) }
+		if !valid {
+			writeAPIError(w,http.StatusUnauthorized,"missing or invalid bearer token","authentication_error")
 			return
 		}
-		provided := strings.TrimSpace(strings.TrimPrefix(value, prefix))
-		valid := 0
-		if s.store != nil && s.store.keyValid(provided) { valid = 1 }
-		for _, key := range s.config.GatewayAPIKeys {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(key)) == 1 { valid = 1 }
-		}
-		if valid != 1 {
-			writeAPIError(w, http.StatusUnauthorized, "invalid API key", "authentication_error")
+		next(w,r)
+	}
+}
+
+// Admin operations are intentionally restricted to the environment-level administrator key.
+// Generated application keys can call the model API but cannot mutate gateway configuration.
+func (s *Server) authenticateAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter,r *http.Request) {
+		provided,ok:=bearerToken(r)
+		if !ok || !s.environmentKeyValid(provided) {
+			writeAPIError(w,http.StatusUnauthorized,"administrator key required","authentication_error")
 			return
 		}
-		next(w, r)
+		next(w,r)
 	}
 }
 
