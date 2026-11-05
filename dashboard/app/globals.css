@@ -173,3 +173,8 @@
 .account-actions .ghost{width:27px;height:27px;display:grid;place-items:center;padding:0}
 .account-bulk-actions{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;line-height:1.5}
 @media(max-width:760px){.account-connect-controls{max-width:none}.account-bulk-actions{align-items:flex-start;flex-direction:column}.account-actions{flex-wrap:wrap}}
+
+.oauth-manual-callback{display:grid;gap:7px;flex:1 1 100%;min-width:0}
+.oauth-manual-callback label{font:8px var(--mono);color:var(--dim);letter-spacing:.08em}
+.oauth-redirect-input{width:100%;min-height:56px;padding:9px 10px;resize:vertical;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font:9px/1.5 var(--mono)}
+.oauth-redirect-input:focus{outline:1px solid #7162bd;border-color:#7162bd}
