@@ -25,8 +25,9 @@ type Provider struct {
 }
 
 type Route struct {
-	Provider      string `json:"provider"`
-	UpstreamModel string `json:"upstream_model"`
+	Provider       string   `json:"provider"`
+	UpstreamModel  string   `json:"upstream_model"`
+	FallbackModels []string `json:"fallback_models,omitempty"`
 }
 
 type Config struct {
