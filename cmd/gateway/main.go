@@ -45,4 +45,5 @@ func main() {
 		logger.Warn("graceful shutdown failed", "error", err)
 		_ = httpServer.Close()
 	}
+	handler.Close()
 }
