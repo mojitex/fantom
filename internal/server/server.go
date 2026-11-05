@@ -54,8 +54,6 @@ func (p *providerRuntime) apiKeysForRequest() []string {
 	defer p.keyMu.Unlock()
 
 	ordered := make([]string, 0, len(keys))
-	earliestIndex := start
-	var earliest time.Time
 	for offset := 0; offset < len(keys); offset++ {
 		index := (start + offset) % len(keys)
 		if index >= len(p.keyCooldowns) {
@@ -65,19 +63,11 @@ func (p *providerRuntime) apiKeysForRequest() []string {
 		if until.IsZero() || !now.Before(until) {
 			p.keyCooldowns[index] = time.Time{}
 			ordered = append(ordered, keys[index])
-			continue
-		}
-		if earliest.IsZero() || until.Before(earliest) {
-			earliest = until
-			earliestIndex = index
 		}
 	}
-	if len(ordered) > 0 {
-		return ordered
-	}
-	// If every credential is cooling down, probe only the one whose cooldown
-	// expires first instead of hammering every known-throttled credential.
-	return []string{keys[earliestIndex]}
+	// Returning no credentials lets routing advance to another provider instead
+	// of probing a key whose Retry-After window has not expired.
+	return ordered
 }
 
 func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter string) {
@@ -100,6 +90,22 @@ func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter 
 		}
 		return
 	}
+}
+
+func (p *providerRuntime) credentialCooldownRemaining() time.Duration {
+	now := time.Now()
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	var earliest time.Time
+	for _, until := range p.keyCooldowns {
+		if until.After(now) && (earliest.IsZero() || until.Before(earliest)) {
+			earliest = until
+		}
+	}
+	if earliest.IsZero() {
+		return 0
+	}
+	return earliest.Sub(now)
 }
 
 func credentialCooldown(status int, retryAfter string, now time.Time) time.Duration {
@@ -439,6 +445,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	attempts:=0
 	modelFallbacks:=0
 	credentialRetries:=0
+	cooldownRetrySeconds:=0
 	for candidateIndex,candidateModel:=range candidates {
 		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
 		if resolveErr!=nil { lastErr=resolveErr; continue }
@@ -460,6 +467,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		keyAttempts:=provider.apiKeysForRequest()
+		if provider.config.AuthType=="bearer" && len(keyAttempts)==0 {
+			remaining := provider.credentialCooldownRemaining()
+			if remaining > 0 {
+				seconds := int((remaining + time.Second - 1) / time.Second)
+				if cooldownRetrySeconds == 0 || seconds < cooldownRetrySeconds { cooldownRetrySeconds = seconds }
+			}
+			lastErr=fmt.Errorf("all credentials for provider %q are cooling down",target.ProviderID)
+			continue
+		}
 		for keyIndex,key:=range keyAttempts {
 			if provider.config.AuthType=="bearer"&&key=="" {
 				lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID)
@@ -526,6 +542,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if response==nil {
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
+		if cooldownRetrySeconds > 0 {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", strconv.Itoa(cooldownRetrySeconds))
+		}
 		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
 		writeAPIError(w,status,message,"provider_error")
 		return
