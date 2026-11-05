@@ -160,13 +160,40 @@ func tailRequests(items []requestRecord,limit int) []requestRecord {
 	return out
 }
 func (s *Server) usageSummary(items []requestRecord) map[string]any {
-	var total,success,failed int
+	var total, success, failed int
 	var latency int64
-	providers:=map[string]int{}
-	models:=map[string]int{}
-	for _,item:=range items { total++; latency+=item.LatencyMS; providers[item.Provider]++; models[item.Model]++; if item.Status>=200&&item.Status<400 { success++ } else { failed++ } }
-	avg:=int64(0); if total>0 { avg=latency/int64(total) }
-	return map[string]any{"total_requests":total,"successful_requests":success,"failed_requests":failed,"avg_latency_ms":avg,"by_provider":providers,"by_model":models}
+	var promptTokens, completionTokens, totalTokens int64
+	providers := map[string]int{}
+	models := map[string]int{}
+	for _, item := range items {
+		total++
+		latency += item.LatencyMS
+		promptTokens += item.PromptTokens
+		completionTokens += item.CompletionTokens
+		totalTokens += item.TotalTokens
+		providers[item.Provider]++
+		models[item.Model]++
+		if item.Status >= 200 && item.Status < 400 {
+			success++
+		} else {
+			failed++
+		}
+	}
+	avg := int64(0)
+	if total > 0 {
+		avg = latency / int64(total)
+	}
+	return map[string]any{
+		"total_requests": total,
+		"successful_requests": success,
+		"failed_requests": failed,
+		"avg_latency_ms": avg,
+		"prompt_tokens": promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens": totalTokens,
+		"by_provider": providers,
+		"by_model": models,
+	}
 }
 
 var _ = errors.New
