@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mojitex/fantom/internal/config"
 )
@@ -379,4 +380,41 @@ func TestModelCatalogIsCachedAndCanBeInvalidated(t *testing.T) {
 	if refresh.Code!=http.StatusOK { t.Fatalf("catalog refresh = %d: %s",refresh.Code,refresh.Body.String()) }
 	_ = call(http.MethodGet,"/v1/models")
 	if got:=catalogCalls.Load();got!=2 { t.Fatalf("catalog endpoint called %d times after refresh, want 2",got) }
+}
+
+
+func TestProviderCooldownSkipsThrottledCredentials(t *testing.T) {
+	provider := &providerRuntime{config: config.Provider{APIKeys: []string{"throttled-key", "healthy-key"}}}
+	provider.cooldownCredential("throttled-key", http.StatusTooManyRequests, "120")
+
+	got := provider.apiKeysForRequest()
+	if len(got) != 1 || got[0] != "healthy-key" {
+		t.Fatalf("available key order = %#v, want only healthy-key", got)
+	}
+
+	// If every key is cooling down, do not fan out to every known-throttled key.
+	provider.cooldownCredential("healthy-key", http.StatusForbidden, "")
+	got = provider.apiKeysForRequest()
+	if len(got) != 1 {
+		t.Fatalf("all-cooling pool should probe only one key, got %#v", got)
+	}
+}
+
+func TestCredentialCooldownHonorsAndBoundsRetryAfter(t *testing.T) {
+	now := time.Now()
+	if got := credentialCooldown(http.StatusTooManyRequests, "120", now); got != 120*time.Second {
+		t.Fatalf("Retry-After seconds = %s, want 2m", got)
+	}
+	if got := credentialCooldown(http.StatusTooManyRequests, "7200", now); got != time.Hour {
+		t.Fatalf("large Retry-After was not capped: %s", got)
+	}
+	if got := credentialCooldown(http.StatusTooManyRequests, "0", now); got != 0 {
+		t.Fatalf("Retry-After: 0 should not add a cooldown, got %s", got)
+	}
+	if got := credentialCooldown(http.StatusUnauthorized, "", now); got != 2*time.Minute {
+		t.Fatalf("unauthorized cooldown = %s, want 2m", got)
+	}
+	if got := credentialCooldown(http.StatusBadGateway, "", now); got != 0 {
+		t.Fatalf("non-credential failure should not cool a key, got %s", got)
+	}
 }
