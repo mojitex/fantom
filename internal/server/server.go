@@ -432,6 +432,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		record.Provider=provider.config.ID
 		break
 	}
+	if attempts > 0 {
+		w.Header().Set("X-Fantom-Upstream-Attempts", fmt.Sprint(attempts))
+	}
+	if modelFallbacks > 0 {
+		w.Header().Set("X-Fantom-Fallback-Attempts", fmt.Sprint(modelFallbacks))
+	}
+	if credentialRetries > 0 {
+		w.Header().Set("X-Fantom-Credential-Retries", fmt.Sprint(credentialRetries))
+	}
+	record.UpstreamAttempts = attempts
+	record.CredentialRetries = credentialRetries
+	record.FallbackAttempts = modelFallbacks
+
 	if response==nil {
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
@@ -442,15 +455,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer response.Body.Close()
 	if selectedProvider!=nil {
 		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
-	}
-	if attempts > 0 {
-		w.Header().Set("X-Fantom-Upstream-Attempts", fmt.Sprint(attempts))
-	}
-	if modelFallbacks > 0 {
-		w.Header().Set("X-Fantom-Fallback-Attempts", fmt.Sprint(modelFallbacks))
-	}
-	if credentialRetries > 0 {
-		w.Header().Set("X-Fantom-Credential-Retries", fmt.Sprint(credentialRetries))
 	}
 	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
