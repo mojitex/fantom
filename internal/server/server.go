@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,11 +24,13 @@ import (
 )
 
 type providerRuntime struct {
-	config          config.Provider
-	client          *http.Client
-	nextKey         atomic.Uint64
-	catalogMu       sync.Mutex
-	catalogModels   []string
+	config           config.Provider
+	client           *http.Client
+	nextKey          atomic.Uint64
+	keyMu            sync.Mutex
+	keyCooldowns     []time.Time
+	catalogMu        sync.Mutex
+	catalogModels    []string
 	catalogFetchedAt time.Time
 }
 
@@ -37,18 +40,100 @@ func (p *providerRuntime) apiKey() string {
 	return p.config.APIKeys[index]
 }
 
-// apiKeysForRequest returns a complete credential rotation beginning at the next
-// round-robin position. A failed credential can therefore be skipped without
-// permanently pinning a provider to a revoked or rate-limited key.
+// apiKeysForRequest rotates through credentials that are not currently cooling
+// down. An empty result means every configured credential is temporarily
+// unavailable and routing should try another candidate rather than hammer them.
 func (p *providerRuntime) apiKeysForRequest() []string {
 	keys := p.config.APIKeys
-	if len(keys) == 0 { return []string{""} }
-	start := int((p.nextKey.Add(1) - 1) % uint64(len(keys)))
-	ordered := make([]string, 0, len(keys))
-	for i := 0; i < len(keys); i++ {
-		ordered = append(ordered, keys[(start+i)%len(keys)])
+	if len(keys) == 0 {
+		return []string{""}
 	}
+	start := int((p.nextKey.Add(1) - 1) % uint64(len(keys)))
+	now := time.Now()
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+
+	ordered := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for offset := 0; offset < len(keys); offset++ {
+		index := (start + offset) % len(keys)
+		key := keys[index]
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if index >= len(p.keyCooldowns) {
+			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
+		}
+		until := p.keyCooldowns[index]
+		if until.IsZero() || !now.Before(until) {
+			p.keyCooldowns[index] = time.Time{}
+			ordered = append(ordered, key)
+		}
+	}
+	// Returning no credentials lets routing advance to another provider instead
+	// of probing a key whose Retry-After window has not expired.
 	return ordered
+}
+
+func (p *providerRuntime) cooldownCredential(key string, status int, retryAfter string) {
+	duration := credentialCooldown(status, retryAfter, time.Now())
+	if duration <= 0 || key == "" {
+		return
+	}
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	until := time.Now().Add(duration)
+	for index, configured := range p.config.APIKeys {
+		if configured != key {
+			continue
+		}
+		if index >= len(p.keyCooldowns) {
+			p.keyCooldowns = append(p.keyCooldowns, make([]time.Time, index-len(p.keyCooldowns)+1)...)
+		}
+		if until.After(p.keyCooldowns[index]) {
+			p.keyCooldowns[index] = until
+		}
+	}
+}
+
+func (p *providerRuntime) credentialCooldownRemaining() time.Duration {
+	now := time.Now()
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	var earliest time.Time
+	for _, until := range p.keyCooldowns {
+		if until.After(now) && (earliest.IsZero() || until.Before(earliest)) {
+			earliest = until
+		}
+	}
+	if earliest.IsZero() {
+		return 0
+	}
+	return earliest.Sub(now)
+}
+
+func credentialCooldown(status int, retryAfter string, now time.Time) time.Duration {
+	const maxCooldown = time.Hour
+	switch status {
+	case http.StatusTooManyRequests:
+		value := strings.TrimSpace(retryAfter)
+		if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+			if seconds >= int(maxCooldown/time.Second) { return maxCooldown }
+			return time.Duration(seconds) * time.Second
+		}
+		if parsed, err := http.ParseTime(value); err == nil {
+			duration := parsed.Sub(now)
+			if duration > maxCooldown { return maxCooldown }
+			if duration < 0 { return 0 }
+			return duration
+		}
+		return 30 * time.Second
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired:
+		return 2 * time.Minute
+	default:
+		return 0
+	}
 }
 
 type Server struct {
@@ -269,6 +354,7 @@ func (s *Server) providerModels(ctx context.Context, provider *providerRuntime) 
 			break
 		}
 		if shouldRetryCredential(resp.StatusCode) {
+			provider.cooldownCredential(key, resp.StatusCode, resp.Header.Get("Retry-After"))
 			_ = resp.Body.Close()
 			continue
 		}
@@ -364,6 +450,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	attempts:=0
 	modelFallbacks:=0
 	credentialRetries:=0
+	cooldownRetrySeconds:=0
 	for candidateIndex,candidateModel:=range candidates {
 		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
 		if resolveErr!=nil { lastErr=resolveErr; continue }
@@ -385,6 +472,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		keyAttempts:=provider.apiKeysForRequest()
+		if provider.config.AuthType=="bearer" && len(keyAttempts)==0 {
+			remaining := provider.credentialCooldownRemaining()
+			if remaining > 0 {
+				seconds := int((remaining + time.Second - 1) / time.Second)
+				if cooldownRetrySeconds == 0 || seconds < cooldownRetrySeconds { cooldownRetrySeconds = seconds }
+			}
+			lastErr=fmt.Errorf("all credentials for provider %q are cooling down",target.ProviderID)
+			continue
+		}
 		for keyIndex,key:=range keyAttempts {
 			if provider.config.AuthType=="bearer"&&key=="" {
 				lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID)
@@ -411,12 +507,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				response=nil
 				break
 			}
-			if shouldRetryCredential(response.StatusCode)&&keyIndex<len(keyAttempts)-1 {
-				lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
-				credentialRetries++
-				_ = response.Body.Close()
-				response=nil
-				continue
+			if shouldRetryCredential(response.StatusCode) {
+				provider.cooldownCredential(key, response.StatusCode, response.Header.Get("Retry-After"))
+				if keyIndex<len(keyAttempts)-1 {
+					lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
+					credentialRetries++
+					_ = response.Body.Close()
+					response=nil
+					continue
+				}
 			}
 			break
 		}
@@ -448,6 +547,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if response==nil {
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
+		if cooldownRetrySeconds > 0 {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", strconv.Itoa(cooldownRetrySeconds))
+		}
 		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
 		writeAPIError(w,status,message,"provider_error")
 		return
