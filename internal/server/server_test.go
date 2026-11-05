@@ -215,3 +215,21 @@ func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
 	if res.Header().Get("X-Fantom-Selected-Provider")!="backup" { t.Fatalf("selected provider = %q",res.Header().Get("X-Fantom-Selected-Provider")) }
 	if res.Header().Get("X-Fantom-Fallback-Attempts")!="1" { t.Fatalf("fallback attempts = %q",res.Header().Get("X-Fantom-Fallback-Attempts")) }
 }
+
+
+func TestProviderRuntimeRotatesUpstreamKeysRoundRobin(t *testing.T) {
+	provider := &providerRuntime{config:config.Provider{APIKeys:[]string{"key-a","key-b"}}}
+	got:=[]string{provider.apiKey(),provider.apiKey(),provider.apiKey(),provider.apiKey()}
+	want:=[]string{"key-a","key-b","key-a","key-b"}
+	for i:=range want { if got[i]!=want[i] { t.Fatalf("key rotation = %#v, want %#v",got,want) } }
+}
+
+
+func TestFallbackEligibleStatuses(t *testing.T) {
+	for _,status:=range []int{http.StatusUnauthorized,http.StatusForbidden,http.StatusRequestTimeout,http.StatusConflict,425,http.StatusTooManyRequests,http.StatusInternalServerError,http.StatusBadGateway,http.StatusServiceUnavailable,http.StatusGatewayTimeout} {
+		if !shouldFallback(status) { t.Errorf("status %d should allow fallback",status) }
+	}
+	for _,status:=range []int{http.StatusBadRequest,http.StatusNotFound,http.StatusUnprocessableEntity,http.StatusInternalServerError+1} {
+		if shouldFallback(status) { t.Errorf("status %d should not allow fallback",status) }
+	}
+}

@@ -143,6 +143,15 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		if strings.TrimSpace(alias)=="" { return errors.New("model alias cannot be empty") }
 		if !providers[route.Provider] { return fmt.Errorf("route %q references unknown provider %q",alias,route.Provider) }
 		if strings.TrimSpace(route.UpstreamModel)=="" { return fmt.Errorf("route %q needs an upstream model",alias) }
+		cleanFallbacks:=make([]string,0,len(route.FallbackModels))
+		for _,fallback:=range route.FallbackModels {
+			fallback=strings.TrimSpace(fallback)
+			if fallback=="" { return fmt.Errorf("route %q contains an empty fallback model",alias) }
+			if fallback==alias { return fmt.Errorf("route %q cannot fall back to itself",alias) }
+			cleanFallbacks=append(cleanFallbacks,fallback)
+		}
+		route.FallbackModels=cleanFallbacks
+		routes[alias]=route
 	}
 	d.data.Routes=routes
 	return d.saveLocked()
