@@ -233,83 +233,105 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	record.Streaming=string(payload["stream"])=="true"
 	providerMap:=make(map[string]config.Provider,len(state.Providers))
 	for _,saved:=range state.Providers { p:=saved.runtime(); providerMap[p.ID]=p }
-	target, err := routing.Resolve(input.Model, state.Routes, state.DefaultProvider, providerMap)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error(), "model_not_found")
-		return
-	}
-	provider := s.providerByID(target.ProviderID)
-	record.Provider=target.ProviderID
-	if provider == nil {
-		writeAPIError(w, http.StatusBadGateway, "provider is not available", "provider_error")
-		return
-	}
-	key := provider.apiKey()
-	if provider.config.AuthType == "bearer" && key == "" {
-		writeAPIError(w, http.StatusServiceUnavailable, "provider API key is not configured", "provider_configuration_error")
-		return
-	}
-	if target.UpstreamModel != input.Model {
-		modelJSON, _ := json.Marshal(target.UpstreamModel)
-		payload["model"] = modelJSON
-		body, err = json.Marshal(payload)
-		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, "could not encode routed request", "invalid_request_error")
-			return
+
+	candidates:=[]string{input.Model}
+	seenCandidates:=map[string]bool{input.Model:true}
+	if primary,ok:=state.Routes[input.Model]; ok {
+		for _,fallback:=range primary.FallbackModels {
+			fallback=strings.TrimSpace(fallback)
+			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
 	}
 
-	saverMode := r.Header.Get("X-Fantom-Token-Saver")
-	if strings.TrimSpace(saverMode) == "" {
-		saverMode = state.DefaultTokenSaver
-	}
-	codeMode := r.Header.Get("X-Fantom-Code-Mode")
-	if strings.TrimSpace(codeMode) == "" {
-		codeMode = state.DefaultCodeMode
-	}
-	body, optimizationStats := optimizer.Apply(body, saverMode, codeMode)
-	w.Header().Set("X-Fantom-Token-Saver", normalizedMode(saverMode, "safe"))
-	w.Header().Set("X-Fantom-Code-Mode", normalizedMode(codeMode, "lite", "full", "ultra"))
-	if optimizationStats.ToolResultsChanged > 0 {
-		w.Header().Set("X-Fantom-Tool-Results-Optimized", fmt.Sprint(optimizationStats.ToolResultsChanged))
-		w.Header().Set("X-Fantom-Bytes-Saved", fmt.Sprint(optimizationStats.SavedBytes()))
-		w.Header().Set("X-Fantom-Estimated-Tokens-Saved", fmt.Sprint(optimizationStats.SavedBytes()/4))
-	}
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, provider.config.BaseURL+provider.config.ChatPath, bytes.NewReader(body))
-	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, "could not create upstream request", "provider_error")
-		return
-	}
-	upstreamRequest.Header.Set("Content-Type", "application/json")
-	accept := strings.TrimSpace(r.Header.Get("Accept"))
-	if accept == "" { accept = "application/json" }
-	upstreamRequest.Header.Set("Accept", accept)
-	upstreamRequest.Header.Set("X-Request-ID", r.Header.Get("X-Request-ID"))
-	// OpenCode Console uses this stable value to keep conversation routing and prompt caching consistent.
-	if provider.config.ID == "opencode-console" {
-		if session := strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session != "" && len(session) <= 256 && !strings.ContainsAny(session, "\r\n") {
-		upstreamRequest.Header.Set("x-opencode-session", session)
-		}
-	}
-	s.applyProviderHeaders(upstreamRequest, provider, key)
+	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
+	if strings.TrimSpace(saverMode)=="" { saverMode=state.DefaultTokenSaver }
+	codeMode:=r.Header.Get("X-Fantom-Code-Mode")
+	if strings.TrimSpace(codeMode)=="" { codeMode=state.DefaultCodeMode }
+	saverMode=normalizedMode(saverMode,"safe","off")
+	codeMode=normalizedMode(codeMode,"lite","full","ultra")
+	w.Header().Set("X-Fantom-Token-Saver",saverMode)
+	w.Header().Set("X-Fantom-Code-Mode",codeMode)
 
-	response, err := provider.client.Do(upstreamRequest)
-	if err != nil {
-		if r.Context().Err() != nil { return }
-		s.logger.Warn("upstream request failed", "provider", provider.config.ID, "model", input.Model, "error", err)
-		writeAPIError(w, http.StatusBadGateway, "upstream provider connection failed: "+err.Error(), "provider_error")
+	var response *http.Response
+	var lastErr error
+	var selectedProvider *providerRuntime
+	attempts:=0
+	for candidateIndex,candidateModel:=range candidates {
+		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
+		if resolveErr!=nil { lastErr=resolveErr; continue }
+		provider:=s.providerByID(target.ProviderID)
+		record.Provider=target.ProviderID
+		if provider==nil { lastErr=fmt.Errorf("provider %q is not available",target.ProviderID); continue }
+		key:=provider.apiKey()
+		if provider.config.AuthType=="bearer"&&key=="" { lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID); continue }
+
+		attemptPayload:=make(map[string]json.RawMessage,len(payload))
+		for name,value:=range payload { attemptPayload[name]=value }
+		modelJSON,_:=json.Marshal(target.UpstreamModel)
+		attemptPayload["model"]=modelJSON
+		attemptBody,marshalErr:=json.Marshal(attemptPayload)
+		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
+		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
+		if optimizationStats.ToolResultsChanged>0 {
+			w.Header().Set("X-Fantom-Tool-Results-Optimized",fmt.Sprint(optimizationStats.ToolResultsChanged))
+			w.Header().Set("X-Fantom-Bytes-Saved",fmt.Sprint(optimizationStats.SavedBytes()))
+			w.Header().Set("X-Fantom-Estimated-Tokens-Saved",fmt.Sprint(optimizationStats.SavedBytes()/4))
+		}
+
+		upstreamRequest,requestErr:=http.NewRequestWithContext(r.Context(),http.MethodPost,provider.config.BaseURL+provider.config.ChatPath,bytes.NewReader(attemptBody))
+		if requestErr!=nil { lastErr=requestErr; continue }
+		upstreamRequest.Header.Set("Content-Type","application/json")
+		accept:=strings.TrimSpace(r.Header.Get("Accept")); if accept=="" { accept="application/json" }
+		upstreamRequest.Header.Set("Accept",accept)
+		upstreamRequest.Header.Set("X-Request-ID",r.Header.Get("X-Request-ID"))
+		if provider.config.ID=="opencode-console" {
+			if session:=strings.TrimSpace(r.Header.Get("X-OpenCode-Session")); session!=""&&len(session)<=256&&!strings.ContainsAny(session,"\\r\\n") {
+				upstreamRequest.Header.Set("x-opencode-session",session)
+			}
+		}
+		s.applyProviderHeaders(upstreamRequest,provider,key)
+		attempts++
+		response,requestErr=provider.client.Do(upstreamRequest)
+		if requestErr!=nil {
+			if r.Context().Err()!=nil { return }
+			lastErr=requestErr
+			s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
+			response=nil
+			continue
+		}
+		if shouldFallback(response.StatusCode)&&candidateIndex<len(candidates)-1 {
+			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
+			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
+			_ = response.Body.Close()
+			response=nil
+			continue
+		}
+		selectedProvider=provider
+		record.Provider=provider.config.ID
+		break
+	}
+	if response==nil {
+		message:="no configured route could serve this model"
+		status:=http.StatusBadGateway
+		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
+		writeAPIError(w,status,message,"provider_error")
 		return
 	}
 	defer response.Body.Close()
-	copyResponseHeaders(w.Header(), response.Header)
+	if selectedProvider!=nil {
+		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
+	}
+	if attempts>1 { w.Header().Set("X-Fantom-Fallback-Attempts",fmt.Sprint(attempts-1)) }
+	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
-	s.streamBody(w, response.Body)
-	if response.StatusCode >= 500 {
-		s.logger.Warn("upstream provider returned server error", "provider", provider.config.ID, "model", input.Model, "status", response.StatusCode)
+	s.streamBody(w,response.Body)
+	if response.StatusCode>=500 {
+		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
+		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
 	}
 }
 
-func normalizedMode(value string, allowed ...string) string {
+func shouldFallback(status int) bool {\n\tswitch status { case http.StatusRequestTimeout, http.StatusConflict, 425, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout: return true }; return false\n}\n\nfunc normalizedMode(value string, allowed ...string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	for _, candidate := range allowed {
 		if value == candidate {
