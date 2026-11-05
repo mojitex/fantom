@@ -18,12 +18,15 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -
 FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates \
     && addgroup -S fantom \
-    && adduser -S -G fantom fantom
+    && adduser -S -G fantom fantom \
+    && mkdir -p /data \
+    && chown -R fantom:fantom /data
 WORKDIR /app
 COPY --from=gateway-builder /out/fantom /app/fantom
 COPY configs/providers.json /app/configs/providers.json
 COPY --from=dashboard-builder /dashboard/out /app/dashboard
-ENV GATEWAY_LISTEN_ADDR=:8080 CONFIG_FILE=/app/configs/providers.json STATIC_DIR=/app/dashboard
+ENV GATEWAY_LISTEN_ADDR=:8080 CONFIG_FILE=/app/configs/providers.json STATIC_DIR=/app/dashboard FANTOM_DATA_DIR=/data
+VOLUME ["/data"]
 EXPOSE 8080
 USER fantom
 ENTRYPOINT ["/app/fantom"]
