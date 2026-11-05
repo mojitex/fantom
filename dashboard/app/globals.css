@@ -34,3 +34,5 @@
 @media(max-width:420px){.metrics-grid,.metrics-grid.three{grid-template-columns:1fr 1fr;gap:8px}.metric-card{padding:12px;min-height:105px}.metric-value{font-size:22px}.banner-visual{display:none}.welcome-banner{min-height:195px}.top-actions{gap:8px}.crumb{font-size:10px}.searchbox{width:100%}.panel-toolbar{flex-direction:column}.provider-actions{flex-wrap:wrap}.settings-save{align-items:flex-start;flex-direction:column;gap:12px}.settings-save .primary{width:100%}}
 
 .fallback-hint{color:#a99cff!important;font-family:var(--mono);font-size:8px!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.modal textarea{width:100%;min-height:78px;resize:vertical;padding:10px 11px;border:1px solid #303a4b;border-radius:7px;outline:0;background:#0c121b;color:var(--text);font:10px/1.6 var(--mono)}.modal textarea:focus{border-color:#8977ed}
