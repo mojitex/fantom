@@ -126,11 +126,11 @@ func TestRTKCompactsTreeSearchListAndLongFileReads(t *testing.T) {
 
 func TestRTKCompactionIsIntegratedAndNeverExpandsToolOutput(t *testing.T) {
 	input:=strings.Join([]string{
-		"file.go:10:"+strings.Repeat("matched source context ",8),
-		"file.go:11:"+strings.Repeat("another matching context ",8),
-		"file.go:12:"+strings.Repeat("third matching context ",8),
-		"file.go:13:"+strings.Repeat("fourth matching context ",8),
-		"file.go:14:"+strings.Repeat("fifth matching context ",8),
+		"src/very/long/path/to/generated/components/that/repeats/file.go:10:"+strings.Repeat("match context ",4),
+		"src/very/long/path/to/generated/components/that/repeats/file.go:11:"+strings.Repeat("another context ",4),
+		"src/very/long/path/to/generated/components/that/repeats/file.go:12:"+strings.Repeat("third context ",4),
+		"src/very/long/path/to/generated/components/that/repeats/file.go:13:"+strings.Repeat("fourth context ",4),
+		"src/very/long/path/to/generated/components/that/repeats/file.go:14:"+strings.Repeat("fifth context ",4),
 	},"\n")
 	request:=fmt.Sprintf("{\"messages\":[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call-1\",\"function\":{\"name\":\"bash\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call-1\",\"content\":%q}]}",input)
 	optimized,stats:=Apply([]byte(request),"safe","off")
