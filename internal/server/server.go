@@ -159,6 +159,7 @@ type modelItem struct {
 	Capabilities  config.ModelCapabilities `json:"capabilities,omitempty"`
 	ContextWindow int                      `json:"context_window,omitempty"`
 	MaxOutput     int                      `json:"max_output,omitempty"`
+	Pricing       *config.ModelPricing     `json:"pricing,omitempty"`
 }
 
 type upstreamModelList struct {
@@ -456,13 +457,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if runtime==nil { continue }
 		for _,model:=range s.providerModels(r.Context(),runtime) {
 			caps := modelCapabilities(runtime.config, model, model)
-			appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
+			item := modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput}
+			if pricing,ok:=runtime.config.ModelPricing[model];ok { item.Pricing=&pricing }
+			appendModel(&items,seen,item)
 		}
 	}
 	for alias,route:=range state.Routes {
 		if runtime:=s.providerByID(route.Provider); runtime!=nil {
 			caps := s.candidateCapabilities(alias, state, providerConfigs)
-			appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
+			item := modelItem{ID:alias,Object:"model",OwnedBy:route.Provider,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput}
+			if provider,ok:=providerConfigs[route.Provider];ok { if pricing,ok:=provider.ModelPricing[route.UpstreamModel];ok { item.Pricing=&pricing } }
+			appendModel(&items,seen,item)
 		}
 	}
 	if s.core != nil {
@@ -473,7 +478,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			for _, model := range coreModels {
 				ownedBy := model.OwnedBy
 				if ownedBy == "" { ownedBy = "cli-proxy-api" }
-				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy})
+				caps := modelCapabilities(config.Provider{ID:ownedBy},model.ID,model.ID)
+				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
 			}
 		}
 	}
