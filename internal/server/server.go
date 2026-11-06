@@ -142,9 +142,10 @@ type Server struct {
 	providers   map[string]*providerRuntime
 	store       *adminStore
 	logger      *slog.Logger
-	handler     http.Handler
-	core        CoreRouter
-	requestID   atomic.Uint64
+	handler       http.Handler
+	core          CoreRouter
+	requestID     atomic.Uint64
+	routeCursors  sync.Map // map[public combo model]*atomic.Uint64
 }
 
 type modelItem struct {
@@ -477,11 +478,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	candidates:=[]string{input.Model}
 	seenCandidates:=map[string]bool{input.Model:true}
+	comboStrategy := "fallback"
 	if primary,ok:=state.Routes[input.Model]; ok {
+		if strings.EqualFold(strings.TrimSpace(primary.Strategy), "round-robin") {
+			comboStrategy = "round-robin"
+		}
 		for _,fallback:=range primary.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
 			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
+	}
+	if comboStrategy == "round-robin" && len(candidates) > 1 {
+		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
+		cursor := value.(*atomic.Uint64)
+		offset := int((cursor.Add(1) - 1) % uint64(len(candidates)))
+		candidates = rotateRouteCandidates(candidates, offset)
 	}
 
 	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
@@ -615,6 +626,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
 	}
+}
+
+// rotateRouteCandidates returns a new ordered candidate slice beginning at offset.
+// The original ordering is retained for the ordinary sequential fallback strategy.
+func rotateRouteCandidates(candidates []string, offset int) []string {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	offset %= len(candidates)
+	if offset == 0 {
+		return candidates
+	}
+	ordered := make([]string, 0, len(candidates))
+	ordered = append(ordered, candidates[offset:]...)
+	ordered = append(ordered, candidates[:offset]...)
+	return ordered
 }
 
 func shouldRetryCredential(status int) bool {
