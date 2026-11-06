@@ -47,6 +47,8 @@ type fusionPanelResult struct {
 	Usage        fusionUsage
 	Attempts     int
 	Status       int
+	CostUSD      float64
+	CostKnown    bool
 	Err          error
 }
 
@@ -651,6 +653,7 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 		if resp.StatusCode<200||resp.StatusCode>=300 {result.Err=fmt.Errorf("model %s returned HTTP %d",model,resp.StatusCode);return result}
 		result.Text=extractChatText(body)
 		result.Usage=extractFusionUsage(body)
+		result.CostUSD,result.CostKnown=estimateRequestCost(provider.config,target.UpstreamModel,result.Usage.PromptTokens,result.Usage.CompletionTokens)
 		if result.Text=="" {result.Err=fmt.Errorf("model %s returned an empty answer",model)}
 		return result
 	}
@@ -692,10 +695,13 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		return
 	}
 	totalPrompt,totalCompletion,totalTokens:=int64(0),int64(0),int64(0)
+	totalCost:=float64(0)
+	costKnown:=true
 	for _,item:=range successful {
 		totalPrompt+=item.Usage.PromptTokens
 		totalCompletion+=item.Usage.CompletionTokens
 		totalTokens+=item.Usage.TotalTokens
+		if item.CostKnown { totalCost+=item.CostUSD } else { costKnown=false }
 	}
 	finalText:=""
 	judgeUsed:=""
@@ -725,6 +731,7 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 			totalPrompt+=judgeResult.Usage.PromptTokens
 			totalCompletion+=judgeResult.Usage.CompletionTokens
 			totalTokens+=judgeResult.Usage.TotalTokens
+			if judgeResult.CostKnown { totalCost+=judgeResult.CostUSD } else { costKnown=false }
 			judgeUsed=judgeModel
 		} else {
 			finalText=successful[0].Text
@@ -738,6 +745,7 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 	record.PromptTokens=totalPrompt
 	record.CompletionTokens=totalCompletion
 	record.TotalTokens=totalTokens
+	if costKnown { record.CostUSD=totalCost; record.CostKnown=true }
 	w.Header().Set("X-Fantom-Fusion-Judge",judgeUsed)
 	w.Header().Set("X-Fantom-Fusion-Panel-Successes",fmt.Sprint(len(successful)))
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
