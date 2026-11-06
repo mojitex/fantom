@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ type CoreRouter interface {
 	Models(context.Context) ([]cliproxyengine.Model, error)
 	HasModel(context.Context, string) bool
 	SyncProviders([]config.Provider) error
+	UsageQueue(context.Context, int) ([]json.RawMessage, error)
 	Close()
 }
 
