@@ -42,7 +42,6 @@ var (
 	rtkLSTotalRE    = regexp.MustCompile("^total \\d+$")
 	rtkTreeGlyphRE  = regexp.MustCompile("[├└]──|│  ")
 	rtkSearchRE     = regexp.MustCompile("^Result of search in '[^']*' \\(total \\d+ files?\\):")
-	rtkNumberedRE   = regexp.MustCompile("^ *[0-9]+\\|")
 	rtkGrepLineRE   = regexp.MustCompile("^(.+):([0-9]+):(.*)$")
 	rtkDateRE       = regexp.MustCompile("\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+(\\d{4}|\\d{2}:\\d{2})\\s+")
 	rtkWindowsPathRE = regexp.MustCompile("^[A-Za-z]:[\\\\/]")
@@ -696,18 +695,23 @@ func compactSearchList(input string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func isMostlyNumbered(lines []string) bool {
-	hits, nonEmpty := 0, 0
-	for _, line := range lines[:minRTK(len(lines), 100)] {
-		if line == "" {
-			continue
-		}
-		nonEmpty++
-		if rtkNumberedRE.MatchString(line) {
-			hits++
-		}
+func isNumberedLine(line string) bool {
+	value:=strings.TrimLeft(line," \\t")
+	digits:=0
+	for digits<len(value) && value[digits]>='0' && value[digits]<='9' {
+		digits++
 	}
-	return nonEmpty >= 5 && float64(hits)/float64(nonEmpty) >= 0.7
+	return digits>0 && digits<len(value) && value[digits]=='|'
+}
+
+func isMostlyNumbered(lines []string) bool {
+	hits,nonEmpty:=0,0
+	for _,line:=range lines[:minRTK(len(lines),100)] {
+		if line=="" {continue}
+		nonEmpty++
+		if isNumberedLine(line) {hits++}
+	}
+	return nonEmpty>=5 && float64(hits)/float64(nonEmpty)>=0.7
 }
 
 func compactReadNumbered(input string) string {
