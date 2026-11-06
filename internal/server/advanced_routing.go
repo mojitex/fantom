@@ -220,7 +220,7 @@ func (s *Server) candidateCapabilities(candidate string, state adminState, provi
 	return config.ModelCapabilities{}
 }
 
-func splitHardCompatibleCandidates(candidates []string, required requiredCapabilitySet, state adminState, providers map[string]config.Provider) ([]string, []string) {
+func (s *Server) splitHardCompatibleCandidates(candidates []string, required requiredCapabilitySet, state adminState, providers map[string]config.Provider) ([]string, []string) {
 	hard := []string{"vision", "pdf", "audio_input", "video_input"}
 	hasRequirement := false
 	for _, key := range hard {
@@ -394,7 +394,7 @@ func extractPromptText(payload map[string]json.RawMessage, maxChars int) string 
 
 func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, candidates []string, state adminState, providers map[string]config.Provider, required requiredCapabilitySet, record *requestRecord) ([]string, bool) {
 	if route.Strategy != "smart" || len(candidates)<2 { return candidates,false }
-	eligible, deferred := splitHardCompatibleCandidates(candidates,required,state,providers)
+	eligible, deferred := s.splitHardCompatibleCandidates(candidates,required,state,providers)
 	orderedBase := append(append([]string(nil),eligible...),deferred...)
 
 	session:=extractRequestSession(r,payload)
