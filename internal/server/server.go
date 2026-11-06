@@ -454,6 +454,17 @@ func (s *Server) environmentKeyValid(provided string) bool {
 // A bounded in-flight count protects memory, goroutines and upstream quotas during bursts.
 func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		maxBytes := s.config.MaxRequestBytes
+		if maxBytes <= 0 {
+			maxBytes = 32 << 20
+		}
+		if r.ContentLength > maxBytes {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request body exceeds the configured size limit", "invalid_request_error")
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
 		if s.inferenceSlots == nil {
 			next(w, r)
 			return
