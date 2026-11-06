@@ -26,7 +26,9 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 - 100-second default response-header timeout; configurable per provider.
 - Provider model catalogs are cached for 45 seconds, serve the last known-good result during transient failures, and can be invalidated through the admin API.
 - Optional outbound HTTP/HTTPS proxy.
-- Safe command-tool output normalization and optional compact code-mode instructions.
+- Safe command-tool output normalization (RTK-style), optional Ponytail code-mode instructions, and language-aware Caveman response compression (Lite/Full/Ultra).
+- Optional Headroom integration posts a validated text projection to a configured `/v1/compress` service. It is disabled by default, has a bounded timeout, preserves tool-call identity and media/provider metadata, and fails open to the original request. User-authored message compression requires a separate explicit opt-in.
+- Headroom and Caveman can be configured in Settings or through `FANTOM_HEADROOM_*` and `FANTOM_CAVEMAN_MODE` environment variables. `X-Fantom-Token-Saver: off` bypasses Headroom and RTK for a request; `X-Fantom-Caveman-Mode` can override Caveman per request.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
 
 ### Embedded Go routing engine
