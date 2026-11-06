@@ -168,6 +168,12 @@ type Server struct {
 	upstreamSlots        chan struct{}
 	maxInflightBodyBytes int64
 	inflightBodyBytes    atomic.Int64
+	inferenceAdmissions atomic.Uint64
+	inferenceRejections atomic.Uint64
+	upstreamAdmissions  atomic.Uint64
+	upstreamRejections  atomic.Uint64
+	providerRejections  atomic.Uint64
+	bodyBudgetRejections atomic.Uint64
 }
 
 type modelItem struct {
@@ -228,6 +234,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.authenticateAdmin(s.handleMetrics))
 	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.limitInference(s.handleChatCompletions)))
@@ -477,8 +484,10 @@ func (s *Server) tryAcquireUpstream() (func(), bool) {
 	}
 	select {
 	case s.upstreamSlots <- struct{}{}:
+		s.upstreamAdmissions.Add(1)
 		return func() { <-s.upstreamSlots }, true
 	default:
+		s.upstreamRejections.Add(1)
 		return nil, false
 	}
 }
@@ -523,6 +532,8 @@ func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 		}
 		releaseBody, bodyAcquired := s.tryAcquireBodyBytes(bodyWeight)
 		if !bodyAcquired {
+			s.inferenceRejections.Add(1)
+			s.bodyBudgetRejections.Add(1)
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("X-Fantom-Admission", "body-budget")
 			writeAPIError(w, http.StatusServiceUnavailable, "gateway request-body memory budget is temporarily exhausted", "service_unavailable")
@@ -535,9 +546,11 @@ func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 		}
 		select {
 		case s.inferenceSlots <- struct{}{}:
+			s.inferenceAdmissions.Add(1)
 			defer func() { <-s.inferenceSlots }()
 			next(w, r)
 		default:
+			s.inferenceRejections.Add(1)
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("X-Fantom-Admission", "rejected")
 			writeAPIError(w, http.StatusServiceUnavailable, "gateway is at its configured concurrency limit; retry shortly", "service_unavailable")
@@ -569,6 +582,40 @@ func (s *Server) authenticateAdmin(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w,r)
 	}
+}
+
+// handleMetrics exposes a small Prometheus text endpoint. It is protected by
+// the administrator bearer key because provider labels and capacity settings
+// are operational metadata.
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_admissions_total Inference requests admitted by the gateway.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_admissions_total counter\nfantom_inference_admissions_total %d\n", s.inferenceAdmissions.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_rejections_total Inference requests rejected by admission control.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_rejections_total counter\nfantom_inference_rejections_total %d\n", s.inferenceRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_body_budget_rejections_total Requests rejected by the weighted body memory budget.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_body_budget_rejections_total counter\nfantom_body_budget_rejections_total %d\n", s.bodyBudgetRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_admissions_total Fantom-managed upstream calls admitted.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_admissions_total counter\nfantom_upstream_admissions_total %d\n", s.upstreamAdmissions.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_rejections_total Fantom-managed upstream calls rejected by the global limit.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_rejections_total counter\nfantom_upstream_rejections_total %d\n", s.upstreamRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_provider_limit_rejections_total Calls rejected by a per-provider concurrency limit.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_provider_limit_rejections_total counter\nfantom_provider_limit_rejections_total %d\n", s.providerRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_in_flight Currently admitted inference requests.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_in_flight gauge\nfantom_inference_in_flight %d\n", len(s.inferenceSlots))
+	_, _ = fmt.Fprintf(w, "fantom_inference_limit %d\n", cap(s.inferenceSlots))
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_in_flight Currently admitted Fantom-managed upstream calls.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_in_flight gauge\nfantom_upstream_in_flight %d\n", len(s.upstreamSlots))
+	_, _ = fmt.Fprintf(w, "fantom_upstream_limit %d\n", cap(s.upstreamSlots))
+	_, _ = fmt.Fprintf(w, "# HELP fantom_request_body_bytes_in_flight Request-body bytes reserved by active inference requests.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_request_body_bytes_in_flight gauge\nfantom_request_body_bytes_in_flight %d\n", s.inflightBodyBytes.Load())
+	_, _ = fmt.Fprintf(w, "fantom_request_body_bytes_limit %d\n", s.maxInflightBodyBytes)
+	s.providersMu.RLock()
+	for id, provider := range s.providers {
+		_, _ = fmt.Fprintf(w, "fantom_provider_in_flight{provider=%s} %d\n", strconv.Quote(id), len(provider.inflight))
+		_, _ = fmt.Fprintf(w, "fantom_provider_limit{provider=%s} %d\n", strconv.Quote(id), cap(provider.inflight))
+	}
+	s.providersMu.RUnlock()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -908,6 +955,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			releaseProvider, acquired := provider.tryAcquire()
 			if !acquired {
 				releaseUpstream()
+				s.providerRejections.Add(1)
 				providerSaturated = true
 				lastErr = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
 				break
