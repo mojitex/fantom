@@ -359,7 +359,119 @@ function ModelCatalog({models,providers,onRefresh}:{models:Model[];providers:Pro
  </section>;
 }
 function Providers({providers,models,onRefresh,onAdd,onEdit,onTest,onDelete}:{providers:Provider[];models:Model[];onRefresh:()=>void;onAdd:()=>void;onEdit:(p:Provider)=>void;onTest:(id:string)=>void;onDelete:(id:string)=>void}){return <><div className="provider-cards">{providers.map((p,i)=>{const providerModels=models.filter(m=>m.owned_by===p.id);return <article className="provider-large" key={p.id}><div className="provider-card-head"><div className={"provider-logo big tone-"+(i%4)}>{p.id.slice(0,2).toUpperCase()}</div><span className={cls("tag",p.has_api_key?"green":"amber")}>{p.has_api_key?"CONNECTED":"NEEDS CREDENTIAL"}</span></div><h3>{p.id}</h3><p className="provider-url">{p.base_url}</p><div className="provider-stats"><div><small>MODELS</small><b>{providerModels.length|| (p.models?.includes("*")?"Auto":"—")}</b></div><div><small>TIMEOUT</small><b>{p.timeout_seconds}s</b></div><div><small>KEYS</small><b>{p.key_count||0}</b></div></div><div className="provider-key-line"><Icon name="key" size={14}/><span>{p.api_key_preview||"No credential configured"}{p.key_count?` · ${p.key_count} rotating keys`:""}</span></div>{providerModels.length>0&&<details className="provider-models"><summary>Available models <span>{providerModels.length}</span></summary><div>{providerModels.slice(0,12).map(m=><code key={m.id}>{m.id}</code>)}{providerModels.length>12&&<small>+ {providerModels.length-12} more</small>}</div></details>}<div className="provider-actions"><button className="secondary" onClick={()=>onTest(p.id)}><Icon name="zap" size={14}/> Test</button><button className="secondary" onClick={()=>onEdit(p)}>Configure</button><button className="icon-button" title="Delete provider" onClick={()=>onDelete(p.id)}><Icon name="trash" size={15}/></button></div></article>})}</div><button className="add-provider-card" onClick={onAdd}><span className="add-circle"><Icon name="plus" size={20}/></span><b>Add provider</b><span>Connect another OpenAI-compatible endpoint</span></button><details className="inline-tool-details"><summary>Browse searchable model catalog <span>{models.length} models</span></summary><ModelCatalog models={models} providers={providers} onRefresh={onRefresh}/></details></>}
-function Routing({routes,providers,alias,setAlias,routeProvider,setRouteProvider,upstreamModel,setUpstreamModel,fallbackModels,setFallbackModels,routeStrategy,setRouteStrategy,stickyLimit,setStickyLimit,onSave,onRemove}:{routes:Record<string,Route>;providers:Provider[];alias:string;setAlias:(v:string)=>void;routeProvider:string;setRouteProvider:(v:string)=>void;upstreamModel:string;setUpstreamModel:(v:string)=>void;fallbackModels:string;setFallbackModels:(v:string)=>void;routeStrategy:"fallback"|"round-robin";setRouteStrategy:(v:"fallback"|"round-robin")=>void;stickyLimit:string;setStickyLimit:(v:string)=>void;onSave:(e:FormEvent)=>void;onRemove:(n:string)=>void}){return <div className="routing-layout"><section className="panel route-create"><div className="panel-heading"><div><div className="eyebrow">ROUTING COMBO</div><h3>Create a combo</h3></div><div className="icon-tile violet"><Icon name="route"/></div></div><p className="muted-copy">Expose a stable model name to your clients and map it to the actual model and provider upstream.</p><form onSubmit={onSave}><label>COMBO NAME</label><input required value={alias} onChange={e=>setAlias(e.target.value)} placeholder="e.g. fantom-fast"/><label>UPSTREAM PROVIDER</label><select required value={routeProvider} onChange={e=>setRouteProvider(e.target.value)}>{providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select><label>UPSTREAM MODEL ID</label><input required value={upstreamModel} onChange={e=>setUpstreamModel(e.target.value)} placeholder="e.g. meta/llama-3.3-70b-instruct"/><label>COMBO STRATEGY</label><select value={routeStrategy} onChange={e=>setRouteStrategy(e.target.value as "fallback"|"round-robin")}><option value="fallback">Sequential fallback</option><option value="round-robin">Round robin + failover</option></select><label>STICKY LIMIT</label><input type="number" min="1" max="10000" value={stickyLimit} onChange={e=>setStickyLimit(e.target.value)} disabled={routeStrategy!=="round-robin"}/><small>Keep each selected model for this many requests before rotating. If that model fails, the remaining candidates are still tried.</small><details className="combo-advanced"><summary>Add fallback models (optional)</summary><label>FALLBACK MODEL ALIASES</label><input value={fallbackModels} onChange={e=>setFallbackModels(e.target.value)} placeholder="backup-fast, backup-stable"/><small>Try these public model IDs or aliases in order when the primary route hits an auth, rate-limit or temporary upstream error.</small></details><button className="primary wide" disabled={!providers.length}><Icon name="plus" size={15}/> Create combo</button></form></section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">ACTIVE COMBOS</div><h3>Your combos</h3></div><span className="tag">{Object.keys(routes).length} ROUTES</span></div><div className="route-list">{Object.entries(routes).map(([name,route])=><div className="route-row" key={name}><div className="route-source"><code>{name}</code><small>PUBLIC MODEL</small></div><div className="route-arrow"><Icon name="route" size={17}/></div><div className="route-target"><b>{route.upstream_model}</b><small>{route.provider} · {(route.strategy||"fallback")==="round-robin"?"ROUND ROBIN · STICKY "+(route.sticky_limit||1):"FALLBACK"}</small>{route.fallback_models&&route.fallback_models.length>0&&<small className="fallback-hint">chain: {route.fallback_models.join(" → ")}</small>}</div><button className="icon-button" onClick={()=>onRemove(name)} title="Remove route"><Icon name="trash" size={14}/></button></div>)}{Object.keys(routes).length===0&&<div className="empty">No combos yet. Create one to give your client a stable model name with automatic fallbacks.</div>}</div></section></div>}
+function Routing({
+ routes,providers,alias,setAlias,routeProvider,setRouteProvider,upstreamModel,setUpstreamModel,
+ fallbackModels,setFallbackModels,routeStrategy,setRouteStrategy,stickyLimit,setStickyLimit,
+ smartDecisionProvider,setSmartDecisionProvider,smartDecisionModel,setSmartDecisionModel,
+ smartPolicy,setSmartPolicy,smartConfidence,setSmartConfidence,smartTimeout,setSmartTimeout,
+ fusionModels,setFusionModels,judgeModel,setJudgeModel,fusionMinPanel,setFusionMinPanel,
+ fusionTimeout,setFusionTimeout,onSave,onRemove
+}:{
+ routes:Record<string,Route>;providers:Provider[];alias:string;setAlias:(v:string)=>void;
+ routeProvider:string;setRouteProvider:(v:string)=>void;upstreamModel:string;setUpstreamModel:(v:string)=>void;
+ fallbackModels:string;setFallbackModels:(v:string)=>void;
+ routeStrategy:"fallback"|"round-robin"|"smart"|"fusion";
+ setRouteStrategy:(v:"fallback"|"round-robin"|"smart"|"fusion")=>void;
+ stickyLimit:string;setStickyLimit:(v:string)=>void;
+ smartDecisionProvider:string;setSmartDecisionProvider:(v:string)=>void;
+ smartDecisionModel:string;setSmartDecisionModel:(v:string)=>void;
+ smartPolicy:"smart-switch"|"strict-lock"|"per-turn";setSmartPolicy:(v:"smart-switch"|"strict-lock"|"per-turn")=>void;
+ smartConfidence:string;setSmartConfidence:(v:string)=>void;smartTimeout:string;setSmartTimeout:(v:string)=>void;
+ fusionModels:string;setFusionModels:(v:string)=>void;judgeModel:string;setJudgeModel:(v:string)=>void;
+ fusionMinPanel:string;setFusionMinPanel:(v:string)=>void;fusionTimeout:string;setFusionTimeout:(v:string)=>void;
+ onSave:(e:FormEvent)=>void;onRemove:(n:string)=>void;
+}){
+ const routeDescription=(route:Route)=>{
+  const strategy=route.strategy||"fallback";
+  if(strategy==="round-robin")return "ROUND ROBIN · STICKY "+(route.sticky_limit||1);
+  if(strategy==="smart")return "SMART · "+(route.smart_policy||"smart-switch").toUpperCase();
+  if(strategy==="fusion")return "FUSION · "+(route.fusion_models?.length||0)+" PANEL MODELS";
+  return "SEQUENTIAL FALLBACK";
+ };
+ return <div className="routing-layout">
+  <section className="panel route-create">
+   <div className="panel-heading"><div><div className="eyebrow">ROUTING COMBO</div><h3>Create a combo</h3></div><div className="icon-tile violet"><Icon name="route"/></div></div>
+   <p className="muted-copy">Expose a stable model name to clients and route it through a tested policy. Every strategy runs in the Go gateway.</p>
+   <form onSubmit={onSave}>
+    <label>COMBO NAME</label>
+    <input required value={alias} onChange={e=>setAlias(e.target.value)} placeholder="e.g. fantom-coding"/>
+    <label>PRIMARY PROVIDER</label>
+    <select required value={routeProvider} onChange={e=>setRouteProvider(e.target.value)}>{providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select>
+    <label>PRIMARY UPSTREAM MODEL</label>
+    <input required value={upstreamModel} onChange={e=>setUpstreamModel(e.target.value)} placeholder="e.g. meta/llama-3.3-70b-instruct"/>
+    <label>COMBO STRATEGY</label>
+    <select value={routeStrategy} onChange={e=>setRouteStrategy(e.target.value as "fallback"|"round-robin"|"smart"|"fusion")}>
+     <option value="fallback">Sequential fallback</option>
+     <option value="round-robin">Round robin + failover</option>
+     <option value="smart">Smart Router (decision model)</option>
+     <option value="fusion">Fusion (parallel panel + judge)</option>
+    </select>
+    {routeStrategy==="round-robin"&&<div className="combo-advanced-fields">
+     <label>STICKY LIMIT (REQUESTS PER MODEL)</label>
+     <input type="number" min="1" max="10000" value={stickyLimit} onChange={e=>setStickyLimit(e.target.value)}/>
+     <small>Rotate the first-choice model after this many requests. Failed choices still fall through to the remaining candidates.</small>
+    </div>}
+    {routeStrategy==="smart"&&<div className="combo-advanced-fields">
+     <div className="eyebrow">SYSTEM ONE DECISION POLICY</div>
+     <label>DECISION PROVIDER</label>
+     <select required value={smartDecisionProvider} onChange={e=>setSmartDecisionProvider(e.target.value)}>
+      <option value="">Select a decision provider</option>
+      {providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}
+     </select>
+     <label>DECISION MODEL ID</label>
+     <input required value={smartDecisionModel} onChange={e=>setSmartDecisionModel(e.target.value)} placeholder="e.g. router-model"/>
+     <label>SESSION POLICY</label>
+     <select value={smartPolicy} onChange={e=>setSmartPolicy(e.target.value as "smart-switch"|"strict-lock"|"per-turn")}>
+      <option value="smart-switch">Smart Switch — adaptive session choice</option>
+      <option value="strict-lock">Strict Lock — lock first decision for session</option>
+      <option value="per-turn">Per Turn — decide every request</option>
+     </select>
+     <label>MINIMUM CONFIDENCE (0.50–0.95)</label>
+     <input type="number" min="0.5" max="0.95" step="0.05" value={smartConfidence} onChange={e=>setSmartConfidence(e.target.value)}/>
+     <label>DECISION TIMEOUT (SECONDS)</label>
+     <input type="number" min="1" max="30" value={smartTimeout} onChange={e=>setSmartTimeout(e.target.value)}/>
+     <small>Decision errors, invalid choices and timeouts fail open to the configured candidate order. Smart Switch retains the previous session model when confidence is below the threshold.</small>
+    </div>}
+    {routeStrategy==="fusion"&&<div className="combo-advanced-fields">
+     <div className="eyebrow">PARALLEL EXPERT PANEL</div>
+     <label>PANEL MODEL IDS / COMBO ALIASES</label>
+     <textarea required rows={4} value={fusionModels} onChange={e=>setFusionModels(e.target.value)} placeholder={"provider-model-a\nprovider-model-b\nprovider-model-c"}/>
+     <small>Enter 2–8 models, one per line or separated by commas. They are called concurrently; tools are disabled for panel calls.</small>
+     <label>JUDGE MODEL ID (OPTIONAL)</label>
+     <input value={judgeModel} onChange={e=>setJudgeModel(e.target.value)} placeholder="Defaults to the first panel model"/>
+     <label>MINIMUM SUCCESSFUL PANEL MODELS</label>
+     <input type="number" min="2" max="8" value={fusionMinPanel} onChange={e=>setFusionMinPanel(e.target.value)}/>
+     <label>FUSION TIMEOUT (SECONDS)</label>
+     <input type="number" min="5" max="180" value={fusionTimeout} onChange={e=>setFusionTimeout(e.target.value)}/>
+     <small>When a panel does not reach quorum, the gateway returns a retryable error. If only one panel model responds, its answer is returned as a degraded result.</small>
+    </div>}
+    <details className="combo-advanced">
+     <summary>Fallback models (optional)</summary>
+     <label>FALLBACK MODEL ALIASES</label>
+     <input value={fallbackModels} onChange={e=>setFallbackModels(e.target.value)} placeholder="backup-fast, backup-stable"/>
+     <small>Used by sequential fallback, round robin and smart routing. Fusion uses its separate panel list.</small>
+    </details>
+    <button className="primary wide" disabled={!providers.length}><Icon name="plus" size={15}/> Save combo</button>
+   </form>
+  </section>
+  <section className="panel">
+   <div className="panel-heading"><div><div className="eyebrow">ACTIVE COMBOS</div><h3>Your combos</h3></div><span className="tag">{Object.keys(routes).length} ROUTES</span></div>
+   <div className="route-list">
+    {Object.entries(routes).map(([name,route])=><div className="route-row" key={name}>
+     <div className="route-source"><code>{name}</code><small>PUBLIC MODEL</small></div>
+     <div className="route-arrow"><Icon name="route" size={17}/></div>
+     <div className="route-target"><b>{route.upstream_model}</b><small>{route.provider} · {routeDescription(route)}</small>
+      {route.fallback_models&&route.fallback_models.length>0&&<small className="fallback-hint">fallback: {route.fallback_models.join(" → ")}</small>}
+      {route.fusion_models&&route.fusion_models.length>0&&<small className="fallback-hint">panel: {route.fusion_models.join(" · ")}</small>}
+      {route.strategy==="smart"&&route.smart_decision_provider&&<small className="fallback-hint">decision: {route.smart_decision_provider}/{route.smart_decision_model}</small>}
+     </div>
+     <button className="icon-button" onClick={()=>onRemove(name)} title="Remove route"><Icon name="trash" size={14}/></button>
+    </div>)}
+    {Object.keys(routes).length===0&&<div className="empty">No combos yet. Create a combo to publish one stable model ID to your clients.</div>}
+   </div>
+  </section>
+ </div>;
+}
 function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){const max=Math.max(1,...Object.values(usage.by_model||{}));return <><div className="metrics-grid three"><Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/><Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/><Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/></div><div className="metrics-grid three usage-token-metrics"><Metric label="PROMPT TOKENS" value={formatNumber(usage.total_prompt_tokens||0)} detail="Reported by providers" glyph="terminal" tone="blue"/><Metric label="COMPLETION TOKENS" value={formatNumber(usage.total_completion_tokens||0)} detail="Reported by providers" glyph="terminal" tone="violet"/><Metric label="TOTAL TOKENS" value={formatNumber(usage.total_tokens||0)} detail="No estimates included" glyph="chart" tone="green"/></div><div className="content-grid"><section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>{Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}{Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}</section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div><div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div><p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p><div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div><div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div></section></div><section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section><details className="inline-tool-details request-explorer"><summary>Open full request explorer <span>{requests.length} retained requests</span></summary><LogsPage requests={requests}/></details></>}
 
 function LogsPage({requests}:{requests:Log[]}) {
