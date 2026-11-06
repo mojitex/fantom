@@ -34,7 +34,7 @@ func TestCompressWithHeadroomPreservesToolIdentityAndOnlyAppliesSmallerText(t *t
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"messages": []map[string]string{
-				{"role":"user","content":"What happened?"},
+				{"role":"user","content":"What?"},
 				{"role":"assistant","content":""},
 				{"role":"tool","tool_call_id":"call-1","content":"3 files changed"},
 			},
