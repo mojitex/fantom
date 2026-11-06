@@ -163,8 +163,10 @@ type Server struct {
 	capacityCursors sync.Map // map[capability]*atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
-	inferenceSlots  chan struct{}
-	upstreamSlots   chan struct{}
+	inferenceSlots       chan struct{}
+	upstreamSlots        chan struct{}
+	maxInflightBodyBytes int64
+	inflightBodyBytes    atomic.Int64
 }
 
 type modelItem struct {
@@ -209,10 +211,18 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if maxConcurrentUpstream <= 0 {
 		maxConcurrentUpstream = 512
 	}
+	maxInflightBodyBytes := cfg.MaxInflightBodyBytes
+	if maxInflightBodyBytes <= 0 {
+		maxInflightBodyBytes = 256 << 20
+	}
+	if maxInflightBodyBytes < cfg.MaxRequestBytes {
+		maxInflightBodyBytes = cfg.MaxRequestBytes
+	}
 	s := &Server{
 		config: cfg, providers: make(map[string]*providerRuntime), store: store, logger: logger,
 		inferenceSlots: make(chan struct{}, maxConcurrent),
 		upstreamSlots: make(chan struct{}, maxConcurrentUpstream),
+		maxInflightBodyBytes: maxInflightBodyBytes,
 	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
@@ -472,6 +482,27 @@ func (s *Server) tryAcquireUpstream() (func(), bool) {
 	}
 }
 
+// tryAcquireBodyBytes reserves a weighted portion of the process-wide request
+// body memory budget. Unknown-length uploads reserve the configured per-request
+// maximum, preventing chunked uploads from bypassing memory admission.
+func (s *Server) tryAcquireBodyBytes(requested int64) (func(), bool) {
+	if s == nil || s.maxInflightBodyBytes <= 0 {
+		return func() {}, true
+	}
+	if requested <= 0 {
+		requested = 1
+	}
+	for {
+		current := s.inflightBodyBytes.Load()
+		if requested > s.maxInflightBodyBytes-current {
+			return nil, false
+		}
+		if s.inflightBodyBytes.CompareAndSwap(current, current+requested) {
+			return func() { s.inflightBodyBytes.Add(-requested) }, true
+		}
+	}
+}
+
 func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		maxBytes := s.config.MaxRequestBytes
@@ -485,6 +516,18 @@ func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 		}
+		bodyWeight := r.ContentLength
+		if bodyWeight < 0 {
+			bodyWeight = maxBytes
+		}
+		releaseBody, bodyAcquired := s.tryAcquireBodyBytes(bodyWeight)
+		if !bodyAcquired {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-Fantom-Admission", "body-budget")
+			writeAPIError(w, http.StatusServiceUnavailable, "gateway request-body memory budget is temporarily exhausted", "service_unavailable")
+			return
+		}
+		defer releaseBody()
 		if s.inferenceSlots == nil {
 			next(w, r)
 			return
