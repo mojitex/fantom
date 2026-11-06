@@ -651,10 +651,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(saverMode)=="" { saverMode=state.DefaultTokenSaver }
 	codeMode:=r.Header.Get("X-Fantom-Code-Mode")
 	if strings.TrimSpace(codeMode)=="" { codeMode=state.DefaultCodeMode }
+	cavemanMode:=r.Header.Get("X-Fantom-Caveman-Mode")
+	if strings.TrimSpace(cavemanMode)=="" { cavemanMode=state.DefaultCavemanMode }
 	saverMode=normalizedMode(saverMode,"safe","off")
 	codeMode=normalizedMode(codeMode,"lite","full","ultra")
+	cavemanMode=normalizedMode(cavemanMode,"lite","full","ultra")
 	w.Header().Set("X-Fantom-Token-Saver",saverMode)
 	w.Header().Set("X-Fantom-Code-Mode",codeMode)
+	w.Header().Set("X-Fantom-Caveman-Mode",cavemanMode)
+
+	if state.HeadroomEnabled && saverMode!="off" {
+		if rawMessages:=payload["messages"];len(rawMessages)>0 {
+			timeout:=time.Duration(state.HeadroomTimeoutSeconds)*time.Second
+			compressed,stats,headroomErr:=optimizer.CompressWithHeadroom(r.Context(),state.HeadroomURL,input.Model,rawMessages,timeout,state.HeadroomCompressUserMessages)
+			if headroomErr==nil {
+				payload["messages"]=compressed
+				w.Header().Set("X-Fantom-Headroom-Status","applied")
+				w.Header().Set("X-Fantom-Headroom-Messages-Changed",fmt.Sprint(stats.MessagesChanged))
+				w.Header().Set("X-Fantom-Headroom-Bytes-Saved",fmt.Sprint(stats.OriginalBytes-stats.CompressedBytes))
+				if stats.TokensSaved>0 { w.Header().Set("X-Fantom-Headroom-Tokens-Saved",fmt.Sprint(stats.TokensSaved)) }
+			} else {
+				w.Header().Set("X-Fantom-Headroom-Status","skipped")
+				s.logger.Warn("Headroom compression skipped; original request retained","error",headroomErr)
+			}
+		}
+	}
 
 	if comboStrategy=="fusion" && hasCombo {
 		fusionRoute:=primaryRoute
@@ -663,7 +684,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if len(eligible)>0 { panel=eligible }
 		panel=s.reorderByCapabilities(panel,required,state,providerMap)
 		fusionRoute.FusionModels=panel
-		s.handleFusionChat(w,r,payload,input.Model,fusionRoute,state,providerMap,&record,saverMode,codeMode)
+		s.handleFusionChat(w,r,payload,input.Model,fusionRoute,state,providerMap,&record,saverMode,codeMode,cavemanMode)
 		return
 	}
 
@@ -696,7 +717,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		attemptBody,marshalErr:=json.Marshal(attemptPayload)
 		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
-		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
+		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode,cavemanMode)
 		if optimizationStats.ToolResultsChanged>0 {
 			w.Header().Set("X-Fantom-Tool-Results-Optimized",fmt.Sprint(optimizationStats.ToolResultsChanged))
 			w.Header().Set("X-Fantom-Bytes-Saved",fmt.Sprint(optimizationStats.SavedBytes()))
