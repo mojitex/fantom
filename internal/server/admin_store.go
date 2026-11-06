@@ -27,15 +27,29 @@ type persistedProvider struct {
 	AuthType       string            `json:"auth_type"`
 	Models         []string          `json:"models"`
 	TimeoutSeconds int               `json:"timeout_seconds"`
-	Headers        map[string]string `json:"headers,omitempty"`
-	APIKeys        []string          `json:"api_keys,omitempty"`
+	Headers           map[string]string                 `json:"headers,omitempty"`
+	ModelCapabilities map[string]config.ModelCapabilities `json:"model_capabilities,omitempty"`
+	ModelPricing      map[string]config.ModelPricing      `json:"model_pricing,omitempty"`
+	APIKeys           []string                           `json:"api_keys,omitempty"`
 }
 
+func cloneModelCapabilities(source map[string]config.ModelCapabilities) map[string]config.ModelCapabilities {
+	if len(source) == 0 { return nil }
+	out := make(map[string]config.ModelCapabilities, len(source))
+	for key, value := range source { out[key] = value }
+	return out
+}
+func cloneModelPricing(source map[string]config.ModelPricing) map[string]config.ModelPricing {
+	if len(source) == 0 { return nil }
+	out := make(map[string]config.ModelPricing, len(source))
+	for key, value := range source { out[key] = value }
+	return out
+}
 func persistProvider(p config.Provider) persistedProvider {
-	return persistedProvider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, APIKeys:append([]string(nil),p.APIKeys...)}
+	return persistedProvider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
 }
 func (p persistedProvider) runtime() config.Provider {
-	return config.Provider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, APIKeys:append([]string(nil),p.APIKeys...)}
+	return config.Provider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
 }
 
 type storedClientKey struct {
@@ -69,14 +83,15 @@ type requestRecord struct {
 }
 
 type adminState struct {
-	Version            int                `json:"version"`
-	DefaultProvider    string             `json:"default_provider"`
-	Providers          []persistedProvider `json:"providers"`
+	Version            int                     `json:"version"`
+	DefaultProvider    string                  `json:"default_provider"`
+	Providers          []persistedProvider     `json:"providers"`
 	Routes             map[string]config.Route `json:"routes"`
-	DefaultTokenSaver  string             `json:"default_token_saver"`
-	DefaultCodeMode    string             `json:"default_code_mode"`
-	ClientKeys         []storedClientKey  `json:"client_keys"`
-	Requests           []requestRecord    `json:"requests"`
+	CapacityAdapters   map[string][]string     `json:"capacity_adapters,omitempty"`
+	DefaultTokenSaver  string                  `json:"default_token_saver"`
+	DefaultCodeMode    string                  `json:"default_code_mode"`
+	ClientKeys         []storedClientKey       `json:"client_keys"`
+	Requests           []requestRecord         `json:"requests"`
 }
 
 type adminStore struct {
@@ -99,12 +114,14 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 	store.data = adminState{Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes, DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode}
 	for _, p := range cfg.Providers { store.data.Providers = append(store.data.Providers, persistProvider(p)) }
 	if store.data.Routes == nil { store.data.Routes = map[string]config.Route{} }
+	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string][]string{} }
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		var loaded adminState
 		if decodeErr := json.Unmarshal(raw, &loaded); decodeErr != nil { return nil, fmt.Errorf("decode Fantom state: %w", decodeErr) }
 		if loaded.Version != 1 { return nil, fmt.Errorf("unsupported Fantom state version %d", loaded.Version) }
 		if loaded.Routes == nil { loaded.Routes = map[string]config.Route{} }
+		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string][]string{} }
 		if loaded.DefaultTokenSaver == "" { loaded.DefaultTokenSaver = cfg.DefaultTokenSaver }
 		if loaded.DefaultCodeMode == "" { loaded.DefaultCodeMode = cfg.DefaultCodeMode }
 		if len(loaded.Providers) == 0 { loaded.Providers = store.data.Providers }
@@ -135,6 +152,12 @@ func (d *adminStore) snapshot() adminState {
 	out := d.data
 	out.Providers = append([]persistedProvider(nil), d.data.Providers...)
 	out.Routes = make(map[string]config.Route,len(d.data.Routes)); for k,v := range d.data.Routes { out.Routes[k]=v }
+	out.CapacityAdapters = make(map[string][]string, len(d.data.CapacityAdapters))
+	for capability, models := range d.data.CapacityAdapters { out.CapacityAdapters[capability] = append([]string(nil), models...) }
+	for i := range out.Providers {
+		out.Providers[i].ModelCapabilities = cloneModelCapabilities(out.Providers[i].ModelCapabilities)
+		out.Providers[i].ModelPricing = cloneModelPricing(out.Providers[i].ModelPricing)
+	}
 	out.ClientKeys = append([]storedClientKey(nil),d.data.ClientKeys...)
 	out.Requests = append([]requestRecord(nil),d.data.Requests...)
 	return out
@@ -160,42 +183,124 @@ func (d *adminStore) deleteProvider(id string) error {
 	return d.saveLocked()
 }
 func (d *adminStore) setRoutes(routes map[string]config.Route) error {
-	d.mu.Lock(); defer d.mu.Unlock()
-	providers:=map[string]bool{}; for _,p:=range d.data.Providers { providers[p.ID]=true }
-	for alias,route:=range routes {
-		if strings.TrimSpace(alias)=="" { return errors.New("model alias cannot be empty") }
-		if !providers[route.Provider] { return fmt.Errorf("route %q references unknown provider %q",alias,route.Provider) }
-		if strings.TrimSpace(route.UpstreamModel)=="" { return fmt.Errorf("route %q needs an upstream model",alias) }
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	providers := map[string]bool{}
+	for _, p := range d.data.Providers { providers[p.ID] = true }
+
+	for alias, route := range routes {
+		alias = strings.TrimSpace(alias)
+		if alias == "" { return errors.New("model alias cannot be empty") }
+		route.Provider = strings.TrimSpace(route.Provider)
+		route.UpstreamModel = strings.TrimSpace(route.UpstreamModel)
+		if !providers[route.Provider] { return fmt.Errorf("route %q references unknown provider %q", alias, route.Provider) }
+		if route.UpstreamModel == "" { return fmt.Errorf("route %q needs an upstream model", alias) }
+
 		strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
-		if strategy == "" {
-			strategy = "fallback"
-		}
-		if strategy != "fallback" && strategy != "round-robin" {
-			return fmt.Errorf("route %q has unsupported strategy %q (use fallback or round-robin)", alias, strategy)
+		if strategy == "" { strategy = "fallback" }
+		switch strategy {
+		case "fallback", "round-robin", "smart", "fusion":
+		default:
+			return fmt.Errorf("route %q has unsupported strategy %q", alias, strategy)
 		}
 		route.Strategy = strategy
+
 		if route.StickyLimit < 0 || route.StickyLimit > 10000 {
 			return fmt.Errorf("route %q sticky limit must be between 0 and 10000", alias)
 		}
-		if strategy == "round-robin" && route.StickyLimit == 0 {
-			route.StickyLimit = 1
+		if strategy == "round-robin" && route.StickyLimit == 0 { route.StickyLimit = 1 }
+		if strategy != "round-robin" { route.StickyLimit = 0 }
+
+		cleanFallbacks := make([]string, 0, len(route.FallbackModels))
+		seen := map[string]bool{alias: true}
+		for _, fallback := range route.FallbackModels {
+			fallback = strings.TrimSpace(fallback)
+			if fallback == "" { return fmt.Errorf("route %q contains an empty fallback model", alias) }
+			if seen[fallback] { return fmt.Errorf("route %q contains duplicate or recursive candidate %q", alias, fallback) }
+			seen[fallback] = true
+			cleanFallbacks = append(cleanFallbacks, fallback)
 		}
-		if strategy == "fallback" {
-			route.StickyLimit = 0
+		route.FallbackModels = cleanFallbacks
+
+		if strategy == "smart" {
+			route.SmartDecisionProvider = strings.TrimSpace(route.SmartDecisionProvider)
+			route.SmartDecisionModel = strings.TrimSpace(route.SmartDecisionModel)
+			if !providers[route.SmartDecisionProvider] { return fmt.Errorf("route %q smart decision provider is unknown", alias) }
+			if route.SmartDecisionModel == "" { return fmt.Errorf("route %q needs a smart decision model", alias) }
+			policy := strings.ToLower(strings.TrimSpace(route.SmartPolicy))
+			if policy == "" { policy = "smart-switch" }
+			if policy != "smart-switch" && policy != "strict-lock" && policy != "per-turn" {
+				return fmt.Errorf("route %q has unsupported smart policy %q", alias, policy)
+			}
+			route.SmartPolicy = policy
+			if route.SmartConfidence == 0 { route.SmartConfidence = 0.8 }
+			if route.SmartConfidence < 0.5 || route.SmartConfidence > 0.95 {
+				return fmt.Errorf("route %q confidence threshold must be between 0.50 and 0.95", alias)
+			}
+			if route.SmartTimeoutSeconds <= 0 { route.SmartTimeoutSeconds = 8 }
+			if route.SmartTimeoutSeconds > 30 { return fmt.Errorf("route %q smart timeout cannot exceed 30 seconds", alias) }
+		} else {
+			route.SmartDecisionProvider = ""
+			route.SmartDecisionModel = ""
+			route.SmartPolicy = ""
+			route.SmartConfidence = 0
+			route.SmartTimeoutSeconds = 0
 		}
-		cleanFallbacks:=make([]string,0,len(route.FallbackModels))
-		for _,fallback:=range route.FallbackModels {
-			fallback=strings.TrimSpace(fallback)
-			if fallback=="" { return fmt.Errorf("route %q contains an empty fallback model",alias) }
-			if fallback==alias { return fmt.Errorf("route %q cannot fall back to itself",alias) }
-			cleanFallbacks=append(cleanFallbacks,fallback)
+
+		if strategy == "fusion" {
+			if len(route.FusionModels) == 0 { route.FusionModels = append([]string{alias}, route.FallbackModels...) }
+			if len(route.FusionModels) < 2 || len(route.FusionModels) > 8 {
+				return fmt.Errorf("route %q fusion requires between 2 and 8 panel models", alias)
+			}
+			cleanPanel := make([]string, 0, len(route.FusionModels))
+			panelSeen := map[string]bool{}
+			for _, model := range route.FusionModels {
+				model = strings.TrimSpace(model)
+				if model == "" || panelSeen[model] || model == alias {
+					return fmt.Errorf("route %q contains an empty, duplicate or recursive fusion model", alias)
+				}
+				panelSeen[model] = true
+				cleanPanel = append(cleanPanel, model)
+			}
+			route.FusionModels = cleanPanel
+			route.JudgeModel = strings.TrimSpace(route.JudgeModel)
+			if route.JudgeModel == "" { route.JudgeModel = cleanPanel[0] }
+			if route.FusionMinPanel <= 0 { route.FusionMinPanel = 2 }
+			if route.FusionMinPanel > len(cleanPanel) { return fmt.Errorf("route %q fusion quorum exceeds panel size", alias) }
+			if route.FusionTimeoutSeconds <= 0 { route.FusionTimeoutSeconds = 45 }
+			if route.FusionTimeoutSeconds > 180 { return fmt.Errorf("route %q fusion timeout cannot exceed 180 seconds", alias) }
+		} else {
+			route.FusionModels = nil
+			route.JudgeModel = ""
+			route.FusionMinPanel = 0
+			route.FusionTimeoutSeconds = 0
 		}
-		route.FallbackModels=cleanFallbacks
-		routes[alias]=route
+		routes[alias] = route
 	}
-	d.data.Routes=routes
+	d.data.Routes = routes
 	return d.saveLocked()
 }
+
+func (d *adminStore) setCapacityAdapters(adapters map[string][]string) error {
+	allowed := map[string]bool{"vision":true, "pdf":true, "audio_input":true, "video_input":true}
+	clean := make(map[string][]string, len(adapters))
+	for capability, models := range adapters {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if !allowed[capability] { return fmt.Errorf("unsupported capacity adapter capability %q", capability) }
+		seen := map[string]bool{}
+		for _, model := range models {
+			model = strings.TrimSpace(model)
+			if model == "" { return fmt.Errorf("capacity adapter %q contains an empty model", capability) }
+			if !seen[model] { clean[capability] = append(clean[capability], model); seen[model] = true }
+			if len(clean[capability]) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.data.CapacityAdapters = clean
+	return d.saveLocked()
+}
+
 func (d *adminStore) setSettings(defaultProvider, saver, code string) error {
 	d.mu.Lock(); defer d.mu.Unlock()
 	found:=false; for _,p:=range d.data.Providers { if p.ID==defaultProvider { found=true; break } }
@@ -330,10 +435,28 @@ func (d *adminStore) appendProviderFromInput(in providerInput, existing *config.
 	models:=in.Models; if len(models)==0 { models=[]string{"*"} }
 	for i:=range models { models[i]=strings.TrimSpace(models[i]) }
 	timeout:=in.TimeoutSeconds; if timeout<=0 { timeout=100 }; if timeout>600 { return config.Provider{},errors.New("timeout cannot exceed 600 seconds") }
-	p:=config.Provider{ID:id,BaseURL:base,ChatPath:chatPath,ModelsURL:strings.TrimSpace(in.ModelsURL),AuthType:auth,Models:models,TimeoutSeconds:timeout}
+for model, caps := range in.ModelCapabilities {
+		model = strings.TrimSpace(model)
+		if model == "" { return config.Provider{}, errors.New("model capability key cannot be empty") }
+		if caps.ContextWindow < 0 || caps.ContextWindow > 10000000 || caps.MaxOutput < 0 || caps.MaxOutput > 1000000 {
+			return config.Provider{}, fmt.Errorf("model %q has invalid context/output limits", model)
+		}
+		in.ModelCapabilities[model] = caps
+	}
+	for model, pricing := range in.ModelPricing {
+		model = strings.TrimSpace(model)
+		if model == "" { return config.Provider{}, errors.New("model pricing key cannot be empty") }
+		if pricing.InputPerMillionUSD < 0 || pricing.OutputPerMillionUSD < 0 || pricing.InputPerMillionUSD > 1000000 || pricing.OutputPerMillionUSD > 1000000 {
+			return config.Provider{}, fmt.Errorf("model %q has invalid pricing; rates must be between 0 and 1000000 USD per million tokens", model)
+		}
+		in.ModelPricing[model] = pricing
+	}
+	p:=config.Provider{ID:id,BaseURL:base,ChatPath:chatPath,ModelsURL:strings.TrimSpace(in.ModelsURL),AuthType:auth,Models:models,TimeoutSeconds:timeout,ModelCapabilities:cloneModelCapabilities(in.ModelCapabilities),ModelPricing:cloneModelPricing(in.ModelPricing)}
 	if existing!=nil {
 		if in.APIKey=="" && len(in.APIKeys)==0 { p.APIKeys=append([]string(nil),existing.APIKeys...) }
 		p.Headers=existing.Headers
+		if in.ModelCapabilities == nil { p.ModelCapabilities=cloneModelCapabilities(existing.ModelCapabilities) }
+		if in.ModelPricing == nil { p.ModelPricing=cloneModelPricing(existing.ModelPricing) }
 	}
 	if in.APIKey!="" { p.APIKeys=[]string{strings.TrimSpace(in.APIKey)} }
 	if len(in.APIKeys)>0 { p.APIKeys=append([]string(nil),in.APIKeys...) }
@@ -358,4 +481,6 @@ type providerInput struct {
 	APIKeys []string `json:"api_keys"`
 	Models []string `json:"models"`
 	TimeoutSeconds int `json:"timeout_seconds"`
+	ModelCapabilities map[string]config.ModelCapabilities `json:"model_capabilities"`
+	ModelPricing map[string]config.ModelPricing `json:"model_pricing"`
 }

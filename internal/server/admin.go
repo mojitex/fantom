@@ -32,6 +32,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w,http.StatusOK,result)
 		return
 	}
+	if len(parts)==1 && parts[0]=="capacity-adapters" {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"adapters": s.store.snapshot().CapacityAdapters})
+		case http.MethodPut:
+			var body struct { Adapters map[string][]string `json:"adapters"` }
+			if !decodeAdminJSON(w, r, &body) { return }
+			if body.Adapters == nil { body.Adapters = map[string][]string{} }
+			if err := s.store.setCapacityAdapters(body.Adapters); err != nil { adminError(w, http.StatusBadRequest, err.Error()); return }
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": body.Adapters})
+		default: methodNotAllowed(w)
+		}
+		return
+	}
 	if len(parts)==1 && parts[0]=="providers" {
 		switch r.Method {
 		case http.MethodGet: s.listProviders(w,r)
@@ -63,7 +77,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case "bootstrap":
 			if r.Method!=http.MethodGet { methodNotAllowed(w); return }
 			state:=s.store.snapshot()
-			writeJSON(w,http.StatusOK,map[string]any{"service":"Fantom","version":"0.2","status":"online","default_provider":state.DefaultProvider,"providers":providerViews(state.Providers),"routes":state.Routes,"settings":map[string]any{"token_saver":state.DefaultTokenSaver,"code_mode":state.DefaultCodeMode},"keys":s.store.listKeys(),"usage":s.usageSummary(state.Requests),"requests":tailRequests(state.Requests,30)})
+			writeJSON(w,http.StatusOK,map[string]any{"service":"Fantom","version":"0.2","status":"online","default_provider":state.DefaultProvider,"providers":providerViews(state.Providers),"routes":state.Routes,"settings":map[string]any{"token_saver":state.DefaultTokenSaver,"code_mode":state.DefaultCodeMode,"capacity_adapters":state.CapacityAdapters},"keys":s.store.listKeys(),"usage":s.usageSummary(state.Requests),"requests":tailRequests(state.Requests,30)})
 			return
 		case "routes":
 			switch r.Method {
@@ -134,7 +148,7 @@ func providerViews(items []persistedProvider) []map[string]any {
 	out:=make([]map[string]any,0,len(items))
 	for _,p:=range sortedProviders(items) {
 		preview:=""; if len(p.APIKeys)>0 { last:=p.APIKeys[0]; if len(last)>4 { preview="••••"+last[len(last)-4:] } else { preview="••••" } }
-		out=append(out,map[string]any{"id":p.ID,"base_url":p.BaseURL,"chat_path":p.ChatPath,"models_url":p.ModelsURL,"auth_type":p.AuthType,"models":p.Models,"timeout_seconds":p.TimeoutSeconds,"has_api_key":len(p.APIKeys)>0,"api_key_preview":preview,"key_count":len(p.APIKeys),"model_count":len(p.Models)})
+		out=append(out,map[string]any{"id":p.ID,"base_url":p.BaseURL,"chat_path":p.ChatPath,"models_url":p.ModelsURL,"auth_type":p.AuthType,"models":p.Models,"timeout_seconds":p.TimeoutSeconds,"has_api_key":len(p.APIKeys)>0,"api_key_preview":preview,"key_count":len(p.APIKeys),"model_count":len(p.Models),"model_capabilities":p.ModelCapabilities,"model_pricing":p.ModelPricing})
 	}
 	return out
 }
