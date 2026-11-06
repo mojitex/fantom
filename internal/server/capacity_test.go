@@ -51,6 +51,49 @@ func TestUpstreamAdmissionAndWeightedBodyBudget(t *testing.T) {
 	releaseBody()
 }
 
+
+func TestMetricsEndpointRequiresAdministratorKey(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	handler := New(&config.Config{
+		DefaultProvider: "test",
+		GatewayAPIKeys: []string{"admin-secret"},
+		MaxRequestBytes: 1 << 20,
+		MaxInflightBodyBytes: 2 << 20,
+		MaxConcurrentRequests: 4,
+		MaxConcurrentUpstreamRequests: 8,
+		MaxConcurrentPerProvider: 2,
+		Providers: []config.Provider{{ID: "test-provider", BaseURL: "https://provider.example/v1", Models: []string{"test-model"}}},
+		Routes: map[string]config.Route{},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	unauthorized := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	unauthorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedResponse, unauthorized)
+	if unauthorizedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized metrics status = %d, want 401", unauthorizedResponse.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer admin-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"fantom_inference_limit 4",
+		"fantom_upstream_limit 8",
+		"fantom_request_body_bytes_limit 2097152",
+		"fantom_provider_limit{provider=\"test-provider\"} 2",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("metrics output missing %q", expected)
+		}
+	}
+}
+
 func TestProviderRuntimeTryAcquireIsBounded(t *testing.T) {
 	provider := newProviderRuntime(config.Provider{ID: "bounded"}, 1)
 	release, ok := provider.tryAcquire()
