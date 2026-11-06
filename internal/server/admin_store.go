@@ -340,7 +340,7 @@ func (d *adminStore) setCapacityAdapters(adapters map[string]capacityAdapterPool
 			if len(models) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
 		}
 		pool.Models=models
-		if len(models)==0 { pool.Enabled=false }
+		if len(models)==0 { pool.Enabled=false; pool.RoundRobin=false }
 		clean[capability]=pool
 	}
 	d.mu.Lock()
