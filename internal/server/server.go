@@ -625,15 +625,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	candidates=s.reorderByCapabilities(candidates,required,state,providerMap)
 	if comboStrategy=="smart" && hasCombo {
 		var used bool
-		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap,&record)
+		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap,required,&record)
 		if used { w.Header().Set("X-Fantom-Smart-Selected",candidates[0]) }
 	}
 	if comboStrategy == "round-robin" && len(candidates) > 1 {
-		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
-		cursor := value.(*atomic.Uint64)
-		stickyLimit := primaryRoute.StickyLimit
-		offset := roundRobinCandidateOffset(cursor, stickyLimit, len(candidates))
-		candidates = rotateRouteCandidates(candidates, offset)
+		eligible, deferred := splitHardCompatibleCandidates(candidates,required,state,providerMap)
+		rotationPool := len(eligible)
+		if rotationPool == 0 {
+			rotationPool = len(candidates)
+		} else if len(deferred) > 0 {
+			candidates = append(append([]string(nil),eligible...),deferred...)
+		}
+		if rotationPool > 1 {
+			value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
+			cursor := value.(*atomic.Uint64)
+			stickyLimit := primaryRoute.StickyLimit
+			offset := roundRobinCandidateOffset(cursor, stickyLimit, rotationPool)
+			candidates = rotateCandidatesWithinPrefix(candidates,offset,rotationPool)
+		}
 	}
 	record.RoutingStrategy=comboStrategy
 
