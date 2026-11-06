@@ -401,6 +401,17 @@ func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payl
 	return ordered,true
 }
 
+func (s *Server) clearSmartSession(r *http.Request, payload map[string]json.RawMessage, comboName string) {
+	if s == nil || r == nil {
+		return
+	}
+	session := extractRequestSession(r, payload)
+	if session == "" {
+		return
+	}
+	s.smartSessions.Delete(comboName + ":" + session)
+}
+
 func applyStickyDecision(candidates []string, previous string) []string {
 	if previous!="" { return moveCandidateFirst(candidates,previous) }
 	return candidates
