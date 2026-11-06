@@ -378,9 +378,12 @@ func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payl
 	if choice=="" { return applyStickyDecision(candidates,previous),false }
 
 	selected:=choice
-	if route.SmartPolicy=="smart-switch" && previous!="" && decision.Confidence < route.SmartConfidence { selected=previous }
-	if route.SmartPolicy=="smart-switch" && decision.Confidence < route.SmartConfidence && previous=="" {
-		return candidates,false
+	if decision.Confidence < route.SmartConfidence {
+		if route.SmartPolicy=="smart-switch" && previous!="" {
+			selected=previous
+		} else {
+			return candidates,false
+		}
 	}
 	ordered:=orderCandidatesByDecision(candidates,selected,decision.Probabilities,state,providers)
 	if key!="" && route.SmartPolicy!="per-turn" {
@@ -408,11 +411,12 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 	if timeout<=0 { timeout=8*time.Second }
 	ctx,cancel:=context.WithTimeout(parent,timeout)
 	defer cancel()
+	state:=s.store.snapshot()
 	criteria:=make([]map[string]any,0,len(candidates))
 	for _,candidate:=range candidates {
-		target,err:=routing.Resolve(candidate,s.store.snapshot().Routes,s.store.snapshot().DefaultProvider,providers)
+		target,err:=resolveCandidate(candidate,state,providers)
 		if err!=nil { continue }
-		caps:=s.candidateCapabilities(candidate,s.store.snapshot(),providers)
+		caps:=s.candidateCapabilities(candidate,state,providers)
 		criteria=append(criteria,map[string]any{"id":candidate,"provider":target.ProviderID,"upstream_model":target.UpstreamModel,"capabilities":caps})
 	}
 	criteriaJSON,_:=json.Marshal(criteria)
@@ -685,10 +689,13 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		attempts+=result.Attempts
 		if result.Err==nil && result.Text!="" {successful=append(successful,result)}
 	}
+	quorum:=route.FusionMinPanel
+	if quorum<2 { quorum=2 }
 	w.Header().Set("X-Fantom-Fusion-Panel-Size",fmt.Sprint(len(route.FusionModels)))
 	w.Header().Set("X-Fantom-Fusion-Successes",fmt.Sprint(len(successful)))
+	w.Header().Set("X-Fantom-Fusion-Quorum",fmt.Sprint(quorum))
 	w.Header().Set("X-Fantom-Upstream-Attempts",fmt.Sprint(attempts))
-	if len(successful)==0 || (len(successful)<route.FusionMinPanel && len(successful)>1) {
+	if len(successful)==0 || (len(successful)<quorum && len(successful)>1) {
 		writeAPIError(w,http.StatusServiceUnavailable,"Fusion panel did not reach its configured quorum","provider_error")
 		record.Status=http.StatusServiceUnavailable
 		record.Engine="fusion"
@@ -736,6 +743,7 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		} else {
 			finalText=successful[0].Text
 			judgeUsed="judge-failed-degraded"
+			costKnown=false
 		}
 	}
 	record.Engine="fusion"
@@ -784,7 +792,7 @@ func writeFusionSSE(w http.ResponseWriter,model,text string,prompt,completion,to
 
 func estimateRequestCost(provider config.Provider, model string, promptTokens, completionTokens int64) (float64,bool) {
 	pricing,ok:=provider.ModelPricing[model]
-	if !ok {return 0,false}
+	if !ok || (promptTokens<=0 && completionTokens<=0) {return 0,false}
 	cost:=float64(promptTokens)*pricing.InputPerMillionUSD/1_000_000 + float64(completionTokens)*pricing.OutputPerMillionUSD/1_000_000
 	return cost,true
 }
