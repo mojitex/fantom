@@ -1,12 +1,17 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mojitex/fantom/internal/config"
 )
@@ -84,17 +89,30 @@ func assertConcurrentAdmission(t *testing.T, maxRequests, maxPerProvider int, li
 		t.Fatal("first request never reached the upstream")
 	}
 
-	second := makeRequest()
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondDone <- makeRequest() }()
+	var second *httptest.ResponseRecorder
+	select {
+	case second = <-secondDone:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		<-firstDone
+		<-secondDone
+		t.Fatalf("%s saturated request did not fail fast", limitKind)
+	}
 	if second.Code != http.StatusServiceUnavailable {
 		close(releaseUpstream)
+		<-firstDone
 		t.Fatalf("%s saturation status = %d, want 503: %s", limitKind, second.Code, second.Body.String())
 	}
 	if got := second.Header().Get("Retry-After"); got != "1" {
 		close(releaseUpstream)
+		<-firstDone
 		t.Fatalf("%s saturation Retry-After = %q, want 1", limitKind, got)
 	}
 	if limitKind == "global" && second.Header().Get("X-Fantom-Admission") != "rejected" {
 		close(releaseUpstream)
+		<-firstDone
 		t.Fatal("global admission rejection header is missing")
 	}
 
@@ -153,5 +171,25 @@ func TestAdminStoreRingBufferRetainsNewestHistoryInOrder(t *testing.T) {
 	}
 	if len(routing.Routes) != 1 {
 		t.Fatalf("routing snapshot lost routes: %#v", routing.Routes)
+	}
+
+	store.path = filepath.Join(t.TempDir(), "fantom-state.json")
+	store.mu.Lock()
+	err := store.saveLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist ring-buffer snapshot: %v", err)
+	}
+	raw, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted adminState
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Requests) != 5000 || persisted.Requests[0].ID != "3" || persisted.Requests[4999].ID != "5002" {
+		t.Fatalf("persisted history is not ordered and bounded: count=%d first=%q last=%q",
+			len(persisted.Requests), persisted.Requests[0].ID, persisted.Requests[len(persisted.Requests)-1].ID)
 	}
 }
