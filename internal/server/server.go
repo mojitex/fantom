@@ -595,28 +595,41 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state:=s.store.snapshot()
 	record.Model=input.Model
 	record.Streaming=string(payload["stream"])=="true"
-	providerMap:=make(map[string]config.Provider,len(state.Providers))
-	for _,saved:=range state.Providers { p:=saved.runtime(); providerMap[p.ID]=p }
-
+	providerMap:=s.providerMap(state)
 	candidates:=[]string{input.Model}
 	seenCandidates:=map[string]bool{input.Model:true}
 	comboStrategy := "fallback"
-	if primary,ok:=state.Routes[input.Model]; ok {
-		if strings.EqualFold(strings.TrimSpace(primary.Strategy), "round-robin") {
-			comboStrategy = "round-robin"
-		}
-		for _,fallback:=range primary.FallbackModels {
+	primaryRoute, hasCombo := state.Routes[input.Model]
+	if hasCombo {
+		strategy:=strings.ToLower(strings.TrimSpace(primaryRoute.Strategy))
+		if strategy!="" { comboStrategy=strategy }
+		for _,fallback:=range primaryRoute.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
 			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
 	}
+	required:=requiredCapabilities(payload)
+	if len(required)>0 {
+		var names []string
+		for name:=range required { names=append(names,name) }
+		sort.Strings(names)
+		w.Header().Set("X-Fantom-Required-Capabilities",strings.Join(names,","))
+	}
+	candidates=s.applyCapacityAdapters(candidates,required,state,providerMap)
+	candidates=s.reorderByCapabilities(candidates,required,state,providerMap)
+	if comboStrategy=="smart" && hasCombo {
+		var used bool
+		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap)
+		if used { w.Header().Set("X-Fantom-Smart-Selected",candidates[0]) }
+	}
 	if comboStrategy == "round-robin" && len(candidates) > 1 {
 		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
 		cursor := value.(*atomic.Uint64)
-		stickyLimit := state.Routes[input.Model].StickyLimit
+		stickyLimit := primaryRoute.StickyLimit
 		offset := roundRobinCandidateOffset(cursor, stickyLimit, len(candidates))
 		candidates = rotateRouteCandidates(candidates, offset)
 	}
+	record.RoutingStrategy=comboStrategy
 
 	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
 	if strings.TrimSpace(saverMode)=="" { saverMode=state.DefaultTokenSaver }
@@ -627,9 +640,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Fantom-Token-Saver",saverMode)
 	w.Header().Set("X-Fantom-Code-Mode",codeMode)
 
+	if comboStrategy=="fusion" && hasCombo {
+		s.handleFusionChat(w,r,payload,input.Model,primaryRoute,state,providerMap,&record,saverMode,codeMode)
+		return
+	}
+
 	var response *http.Response
 	var lastErr error
 	var selectedProvider *providerRuntime
+	selectedUpstreamModel:=""
 	attempts:=0
 	modelFallbacks:=0
 	credentialRetries:=0
@@ -712,6 +731,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if response==nil { continue }
 		selectedProvider=provider
 		record.Provider=provider.config.ID
+		selectedUpstreamModel=target.UpstreamModel
+		record.UpstreamModel=target.UpstreamModel
 		break
 	}
 	if attempts > 0 {
@@ -745,6 +766,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
 	s.streamBodyWithUsage(w,response.Body,&record,response.Header.Get("Content-Type"))
+	if selectedProvider!=nil && selectedUpstreamModel!="" {
+		if cost,known:=estimateRequestCost(selectedProvider.config,selectedUpstreamModel,record.PromptTokens,record.CompletionTokens);known {
+			record.CostUSD=cost
+			record.CostKnown=true
+		}
+	}
 	if response.StatusCode>=500 {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
