@@ -72,6 +72,7 @@ type Config struct {
 	MaxRequestBytes    int64            `json:"-"`
 	MaxConcurrentRequests int            `json:"-"`
 	MaxConcurrentUpstreamRequests int     `json:"-"`
+	MaxInflightBodyBytes int64              `json:"-"`
 	MaxConcurrentPerProvider int         `json:"-"`
 	DefaultTokenSaver             string `json:"-"`
 	DefaultCodeMode               string `json:"-"`
@@ -108,6 +109,13 @@ func Load() (*Config, error) {
 	}
 	cfg.StaticDirectory = envOr("STATIC_DIR", "./dashboard/out")
 	cfg.MaxRequestBytes = int64(ParsePositiveIntEnv("MAX_REQUEST_MB", 32)) << 20
+	cfg.MaxInflightBodyBytes = int64(ParsePositiveIntEnv("FANTOM_MAX_INFLIGHT_BODY_MB", 256)) << 20
+	if cfg.MaxInflightBodyBytes > 8192<<20 {
+		return nil, errors.New("FANTOM_MAX_INFLIGHT_BODY_MB cannot exceed 8192")
+	}
+	if cfg.MaxInflightBodyBytes < cfg.MaxRequestBytes {
+		cfg.MaxInflightBodyBytes = cfg.MaxRequestBytes
+	}
 	cfg.MaxConcurrentRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_REQUESTS", 256)
 	if cfg.MaxConcurrentRequests > 4096 {
 		return nil, errors.New("FANTOM_MAX_CONCURRENT_REQUESTS cannot exceed 4096")
