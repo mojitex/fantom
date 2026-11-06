@@ -29,6 +29,7 @@ type Route struct {
 	UpstreamModel  string   `json:"upstream_model"`
 	FallbackModels []string `json:"fallback_models,omitempty"`
 	Strategy       string   `json:"strategy,omitempty"`
+	StickyLimit    int      `json:"sticky_limit,omitempty"`
 }
 
 type Config struct {
