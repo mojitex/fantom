@@ -101,8 +101,9 @@ type capacityAdapterPool struct {
 // UnmarshalJSON keeps compatibility with the original persisted string-array pools.
 func (p *capacityAdapterPool) UnmarshalJSON(data []byte) error {
 	var legacy []string
-	if len(data)>0 && data[0]=='[' {
-		if err:=json.Unmarshal(data,&legacy);err!=nil{return err}
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed,"[") {
+		if err:=json.Unmarshal([]byte(trimmed),&legacy);err!=nil{return err}
 		p.Enabled=len(legacy)>0
 		p.Models=append([]string(nil),legacy...)
 		return nil
