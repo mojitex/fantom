@@ -593,6 +593,14 @@ func (d *adminStore) flushRequests() {
 		if d.logger != nil {
 			d.logger.Error("could not persist request history batch", "error", err)
 		}
+		// A transient disk error must not leave telemetry dirty indefinitely.
+		// The buffered wake-up is coalesced with any concurrently appended rows.
+		if d.flushWake != nil {
+			select {
+			case d.flushWake <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
