@@ -25,13 +25,16 @@ var ansiPattern = regexp.MustCompile("\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07]
 
 // Apply performs deterministic cleanup only on recognized shell-tool results.
 // User prompts, assistant messages and file-read results are untouched.
-func Apply(body []byte, saverMode, codeMode string) ([]byte, Stats) {
+func Apply(body []byte, saverMode, codeMode string, cavemanModes ...string) ([]byte, Stats) {
 	var stats Stats
 	mode := strings.ToLower(strings.TrimSpace(saverMode))
 	code := strings.ToLower(strings.TrimSpace(codeMode))
+	caveman := "off"
+	if len(cavemanModes)>0 { caveman=strings.ToLower(strings.TrimSpace(cavemanModes[0])) }
 	if mode != "safe" && mode != "balanced" { mode = "off" }
 	if code != "lite" && code != "full" && code != "ultra" { code = "off" }
-	if mode == "off" && code == "off" { return body, stats }
+	if caveman != "lite" && caveman != "full" && caveman != "ultra" { caveman = "off" }
+	if mode == "off" && code == "off" && caveman == "off" { return body, stats }
 
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil { return body, stats }
@@ -84,6 +87,7 @@ func Apply(body []byte, saverMode, codeMode string) ([]byte, Stats) {
 		payload["messages"], _ = json.Marshal(messages)
 	}
 	if code != "off" && addCodeMode(payload, code) { changed = true }
+	if caveman != "off" && addCavemanMode(payload, caveman) { changed = true }
 	if !changed { return body, stats }
 	encoded, err := json.Marshal(payload)
 	if err != nil { return body, Stats{} }
@@ -165,6 +169,46 @@ func addCodeMode(payload map[string]json.RawMessage, mode string) bool {
 	messages = append([]json.RawMessage{systemMessage}, messages...)
 	payload["messages"], _ = json.Marshal(messages)
 	return true
+}
+
+func addCavemanMode(payload map[string]json.RawMessage, mode string) bool {
+	directive:=cavemanDirective(mode)
+	if directive=="" { return false }
+	var messages []json.RawMessage
+	if raw:=payload["messages"];len(raw)>0 {
+		if json.Unmarshal(raw,&messages)!=nil { return false }
+	}
+	if len(messages)>0 {
+		var first map[string]json.RawMessage
+		if json.Unmarshal(messages[0],&first)==nil {
+			var role,content string
+			_ = json.Unmarshal(first["role"],&role)
+			if role=="system" && json.Unmarshal(first["content"],&content)==nil {
+				first["content"],_ = json.Marshal(content+"\n\n"+directive)
+				messages[0],_ = json.Marshal(first)
+				payload["messages"],_ = json.Marshal(messages)
+				return true
+			}
+		}
+	}
+	systemMessage,_:=json.Marshal(map[string]string{"role":"system","content":directive})
+	messages=append([]json.RawMessage{systemMessage},messages...)
+	payload["messages"],_ = json.Marshal(messages)
+	return true
+}
+
+func cavemanDirective(mode string) string {
+	const shared = "Preserve the user's dominant language. Keep code blocks, file paths, commands, URLs, identifiers, error strings, security warnings, irreversible-action confirmations and ordered steps exact. Never invent abbreviations. Do not remove important caveats, validation, safety details or requested explanations. When compression could make meaning ambiguous, use normal clear language for that part and resume concise style afterward. Do not mention this style or add decorative emoji."
+	switch mode {
+	case "lite":
+		return "Write concise, natural, complete sentences. Remove filler, pleasantries, repetition and unnecessary framing. Prefer direct statements and actionable next steps without sounding robotic. "+shared
+	case "full":
+		return "Use a terse technical style. Remove filler, redundant transitions and unnecessary words; short clauses are acceptable, but keep grammar readable and preserve every material fact, condition and step. "+shared
+	case "ultra":
+		return "Use maximum safe compression. Prefer short, information-dense sentences and compact lists only when they improve clarity. Do not trade correctness, context, important reasoning, safety or readability for brevity. "+shared
+	default:
+		return ""
+	}
 }
 
 func codeDirective(mode string) string {
