@@ -68,6 +68,38 @@ func TestRTKCompactsGitStatusAndLSTable(t *testing.T) {
 	}
 }
 
+func TestRTKHandlesWindowsGrepAndLongFormUntrackedGitStatus(t *testing.T) {
+	windowsGrep:=strings.Join([]string{
+		"C:\\workspace\\repo\\main.go:10:"+strings.Repeat("match context ",12),
+		"C:\\workspace\\repo\\main.go:11:"+strings.Repeat("another context ",12),
+		"C:\\workspace\\repo\\other.go:4:"+strings.Repeat("third context ",12),
+		"C:\\workspace\\repo\\other.go:5:"+strings.Repeat("fourth context ",12),
+		"C:\\workspace\\repo\\other.go:6:"+strings.Repeat("fifth context ",12),
+	},"\n")
+	if got:=detectRTKFilter(windowsGrep);got!="grep" {
+		t.Fatalf("Windows grep format detected as %q",got)
+	}
+	grepOutput:=compactGrep(windowsGrep)
+	if !strings.Contains(grepOutput,"5 matches in 2 files") || !strings.Contains(grepOutput,"C:\\workspace\\repo\\main.go") {
+		t.Fatalf("Windows grep paths were not preserved: %s",grepOutput)
+	}
+
+	status:=strings.Join([]string{
+		"On branch feature/new-files",
+		"Untracked files:",
+		"  (use \"git add <file>...\" to include in what will be committed)",
+		"        docs/new-specification.md",
+		"        generated/test-fixture.json",
+	},"\n")
+	if got:=detectRTKFilter(status);got!="git-status" {
+		t.Fatalf("long-form status detected as %q",got)
+	}
+	statusOutput:=compactGitStatus(status)
+	if !strings.Contains(statusOutput,"? Untracked: 2 files") || strings.Contains(statusOutput,"clean") {
+		t.Fatalf("untracked files were lost or mislabeled as clean: %s",statusOutput)
+	}
+}
+
 func TestRTKCompactsTreeSearchListAndLongFileReads(t *testing.T) {
 	tree:=strings.Join([]string{"project","├── src","│  ├── main.go","│  └── util.go","└── tests","3 directories, 2 files",""},"\n")
 	if got:=detectRTKFilter(tree);got!="tree" {t.Fatalf("tree filter detection = %q",got)}
