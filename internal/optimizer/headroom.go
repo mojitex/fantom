@@ -32,6 +32,7 @@ type headroomMessage struct {
 
 type headroomTarget struct {
 	index   int
+	role    string
 	content string
 }
 
@@ -78,7 +79,7 @@ func CompressWithHeadroom(ctx context.Context, baseURL, model string, rawMessage
 			var text string
 			if json.Unmarshal(message["content"], &text) == nil && strings.TrimSpace(text) != "" {
 				projected[i].Content = text
-				targets = append(targets, headroomTarget{index:i,content:text})
+				targets = append(targets, headroomTarget{index:i,role:projected[i].Role,content:text})
 			}
 		}
 	}
@@ -120,6 +121,9 @@ func CompressWithHeadroom(ctx context.Context, baseURL, model string, rawMessage
 	stats.TokensAfter=result.TokensAfter
 	stats.TokensSaved=result.TokensSaved
 	for _, target := range targets {
+		if target.role=="user" && !compressUserMessages {
+			continue
+		}
 		actual:=result.Messages[target.index]
 		expected:=projected[target.index]
 		if actual.Role!=expected.Role || actual.ToolCallID!=expected.ToolCallID {
