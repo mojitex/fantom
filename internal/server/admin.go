@@ -37,7 +37,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, map[string]any{"adapters": s.store.snapshot().CapacityAdapters})
 		case http.MethodPut:
-			var body struct { Adapters map[string][]string `json:"adapters"` }
+			var body struct { Adapters map[string]capacityAdapterPool `json:"adapters"` }
 			if !decodeAdminJSON(w, r, &body) { return }
 			if body.Adapters == nil { body.Adapters = map[string][]string{} }
 			if err := s.store.setCapacityAdapters(body.Adapters); err != nil { adminError(w, http.StatusBadRequest, err.Error()); return }
