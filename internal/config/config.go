@@ -70,6 +70,8 @@ type Config struct {
 	GatewayAPIKeys     []string         `json:"-"`
 	StaticDirectory    string           `json:"-"`
 	MaxRequestBytes    int64            `json:"-"`
+	MaxConcurrentRequests int            `json:"-"`
+	MaxConcurrentPerProvider int         `json:"-"`
 	DefaultTokenSaver             string `json:"-"`
 	DefaultCodeMode               string `json:"-"`
 	DefaultCavemanMode            string `json:"-"`
@@ -105,6 +107,14 @@ func Load() (*Config, error) {
 	}
 	cfg.StaticDirectory = envOr("STATIC_DIR", "./dashboard/out")
 	cfg.MaxRequestBytes = int64(ParsePositiveIntEnv("MAX_REQUEST_MB", 32)) << 20
+	cfg.MaxConcurrentRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_REQUESTS", 256)
+	if cfg.MaxConcurrentRequests > 4096 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_REQUESTS cannot exceed 4096")
+	}
+	cfg.MaxConcurrentPerProvider = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", 64)
+	if cfg.MaxConcurrentPerProvider > 2048 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_PER_PROVIDER cannot exceed 2048")
+	}
 	cfg.DefaultTokenSaver = strings.ToLower(envOr("FANTOM_TOKEN_SAVER", "safe"))
 	if cfg.DefaultTokenSaver != "safe" {
 		cfg.DefaultTokenSaver = "off"
