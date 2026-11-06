@@ -655,7 +655,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	credentialRetries:=0
 	cooldownRetrySeconds:=0
 	for candidateIndex,candidateModel:=range candidates {
-		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
+		target,resolveErr:=resolveCandidate(candidateModel,state,providerMap)
 		if resolveErr!=nil { lastErr=resolveErr; continue }
 		provider:=s.providerByID(target.ProviderID)
 		if candidateIndex > 0 { modelFallbacks++ }
