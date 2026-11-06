@@ -177,6 +177,115 @@ func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
 }
 
 
+func TestComboStrategyValidationAndLegacyDefault(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"admin-secret"},
+		Providers: []config.Provider{{
+			ID: "primary", BaseURL: "https://example.invalid/v1",
+			AuthType: "bearer", APIKeys: []string{"provider-secret"},
+			Models: []string{"model-a"}, TimeoutSeconds: 5,
+		}},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"legacy-combo": {Provider: "primary", UpstreamModel: "model-a"},
+		"rr-combo": {Provider: "primary", UpstreamModel: "model-a", Strategy: "ROUND-ROBIN"},
+	}); err != nil {
+		t.Fatalf("setRoutes() rejected supported strategies: %v", err)
+	}
+	routes := handler.store.snapshot().Routes
+	if routes["legacy-combo"].Strategy != "fallback" {
+		t.Fatalf("legacy route strategy = %q, want fallback", routes["legacy-combo"].Strategy)
+	}
+	if routes["rr-combo"].Strategy != "round-robin" {
+		t.Fatalf("round-robin strategy = %q, want normalized round-robin", routes["rr-combo"].Strategy)
+	}
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"invalid": {Provider: "primary", UpstreamModel: "model-a", Strategy: "smartest"},
+	}); err == nil {
+		t.Fatal("setRoutes() accepted an unsupported combo strategy")
+	}
+}
+
+func TestRoundRobinComboRotatesCandidates(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+
+	type upstreamCounter struct {
+		model string
+		count atomic.Int64
+	}
+	counters := []*upstreamCounter{
+		{model: "primary-model"},
+		{model: "backup-model-a"},
+		{model: "backup-model-b"},
+	}
+	servers := make([]*httptest.Server, 0, len(counters))
+	providers := make([]config.Provider, 0, len(counters))
+	for index, counter := range counters {
+		counter := counter
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode routed request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if got := payload["model"]; got != counter.model {
+				t.Errorf("upstream model = %#v, want %q", got, counter.model)
+			}
+			counter.count.Add(1)
+			_, _ = io.WriteString(w, `{"id":"round-robin-success","choices":[]}`)
+		}))
+		servers = append(servers, server)
+		defer server.Close()
+		providerID := []string{"primary", "backup-a", "backup-b"}[index]
+		providers = append(providers, config.Provider{
+			ID: providerID, BaseURL: server.URL + "/v1", AuthType: "none",
+			Models: []string{counter.model}, TimeoutSeconds: 5,
+		})
+	}
+
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+		Providers: providers,
+		Routes: map[string]config.Route{
+			"frontdoor": {
+				Provider: "primary", UpstreamModel: "primary-model",
+				FallbackModels: []string{"backup-a", "backup-b"}, Strategy: "round-robin",
+			},
+			"backup-a": {Provider: "backup-a", UpstreamModel: "backup-model-a"},
+			"backup-b": {Provider: "backup-b", UpstreamModel: "backup-model-b"},
+		},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	for requestIndex := 0; requestIndex < 6; requestIndex++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"frontdoor","messages":[{"role":"user","content":"hello"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("round-robin request %d = %d: %s", requestIndex+1, res.Code, res.Body.String())
+		}
+	}
+	for _, counter := range counters {
+		if got := counter.count.Load(); got != 2 {
+			t.Errorf("provider for %s received %d requests, want 2", counter.model, got)
+		}
+	}
+}
+
 func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
