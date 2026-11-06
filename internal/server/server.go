@@ -222,8 +222,8 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if maxInflightBodyBytes <= 0 {
 		maxInflightBodyBytes = 256 << 20
 	}
-	if maxInflightBodyBytes < cfg.MaxRequestBytes {
-		maxInflightBodyBytes = cfg.MaxRequestBytes
+	if maxInflightBodyBytes < cfg.MaxRequestBytes*2 {
+		maxInflightBodyBytes = cfg.MaxRequestBytes * 2
 	}
 	s := &Server{
 		config: cfg, providers: make(map[string]*providerRuntime), store: store, logger: logger,
@@ -529,6 +529,13 @@ func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 		bodyWeight := r.ContentLength
 		if bodyWeight < 0 {
 			bodyWeight = maxBytes
+		}
+		if bodyWeight > int64(^uint64(0)>>1)/2 {
+			bodyWeight = s.maxInflightBodyBytes + 1
+		} else {
+			// Reserve twice the wire size for the body buffer and the JSON
+			// representation retained while routing/optimizing the request.
+			bodyWeight *= 2
 		}
 		releaseBody, bodyAcquired := s.tryAcquireBodyBytes(bodyWeight)
 		if !bodyAcquired {
