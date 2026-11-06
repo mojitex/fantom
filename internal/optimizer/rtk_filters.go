@@ -45,7 +45,6 @@ type rtkLineMatch struct {
 }
 
 func detectRTKFilter(text string) string {
-	if len(text)<500 || len(text)>10<<20 { return "" }
 	head := text
 	if len(head) > rtkDetectWindow {
 		head = head[:rtkDetectWindow]
@@ -104,6 +103,7 @@ func detectRTKFilter(text string) string {
 }
 
 func autoCompactRTK(text string) string {
+	if len(text)<500 || len(text)>10<<20 { return text }
 	switch detectRTKFilter(text) {
 	case "git-diff":
 		return compactGitDiff(text)
