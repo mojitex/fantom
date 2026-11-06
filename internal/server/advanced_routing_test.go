@@ -339,3 +339,121 @@ func TestFusionSinglePanelDegradesWithoutJudge(t *testing.T) {
 	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "single panel answer") { t.Fatalf("single-panel degradation returned %d: %s", res.Code, res.Body.String()) }
 	if res.Header().Get("X-Fantom-Fusion-Judge") != "single-panel-degraded" { t.Fatalf("unexpected degraded fusion header: %q", res.Header().Get("X-Fantom-Fusion-Judge")) }
 }
+
+
+func TestChatAppliesHeadroomAndCavemanWithoutChangingUserText(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	var headroomCalls atomic.Int64
+	headroom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headroomCalls.Add(1)
+		if r.URL.Path != "/v1/compress" {
+			t.Errorf("Headroom path = %q", r.URL.Path)
+		}
+		var request struct {
+			Model string `json:"model"`
+			Messages []struct {
+				Role string `json:"role"`
+				Content string `json:"content"`
+				ToolCallID string `json:"tool_call_id"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode Headroom payload: %v", err)
+			http.Error(w, "bad payload", http.StatusBadRequest)
+			return
+		}
+		if request.Model != "test-model" || len(request.Messages) != 3 {
+			t.Errorf("unexpected Headroom projection: %#v", request)
+		}
+		if request.Messages[2].Role != "tool" || request.Messages[2].ToolCallID != "call-1" {
+			t.Errorf("Headroom projection lost tool identity: %#v", request.Messages[2])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"messages": []map[string]string{
+				{"role": "user", "content": "Keep this exact user message."},
+				{"role": "assistant", "content": ""},
+				{"role": "tool", "tool_call_id": "call-1", "content": "3 files changed"},
+			},
+			"tokens_before": 120, "tokens_after": 70, "tokens_saved": 50,
+		})
+	}))
+	defer headroom.Close()
+
+	var upstreamCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		var payload struct {
+			Messages []struct {
+				Role string `json:"role"`
+				Content string `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"messages"`
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+			http.Error(w, "bad payload", http.StatusBadRequest)
+			return
+		}
+		if payload.Model != "test-model" || len(payload.Messages) != 4 {
+			t.Errorf("unexpected upstream payload: %#v", payload)
+		}
+		if payload.Messages[0].Role != "system" ||
+			!strings.Contains(payload.Messages[0].Content, "Preserve the user's dominant language") {
+			t.Errorf("Caveman instruction did not reach upstream: %#v", payload.Messages)
+		}
+		if payload.Messages[1].Content != "Keep this exact user message." {
+			t.Errorf("Headroom changed a user message without opt-in: %q", payload.Messages[1].Content)
+		}
+		if payload.Messages[3].Content != "3 files changed" {
+			t.Errorf("Headroom-compressed tool text was not forwarded: %q", payload.Messages[3].Content)
+		}
+		if len(payload.Messages[2].ToolCalls) != 1 {
+			t.Errorf("assistant tool-call metadata was lost: %#v", payload.Messages[2])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "main",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		DefaultTokenSaver: "safe",
+		DefaultCodeMode: "off",
+		DefaultCavemanMode: "full",
+		HeadroomEnabled: true,
+		HeadroomURL: headroom.URL,
+		HeadroomTimeoutSeconds: 2,
+		HeadroomCompressUserMessages: false,
+		Providers: []config.Provider{{
+			ID: "main", BaseURL: upstream.URL + "/v1", AuthType: "none",
+			Models: []string{"test-model"}, TimeoutSeconds: 5,
+		}},
+	}
+	s := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(s.Close)
+
+	requestBody := `{"model":"test-model","stream":false,"messages":[
+		{"role":"user","content":"Keep this exact user message."},
+		{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call-1","name":"read_file","content":"file a changed\nfile b changed\nfile c changed"}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, req)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("chat response = %d: %s", response.Code, response.Body.String())
+	}
+	if headroomCalls.Load() != 1 || upstreamCalls.Load() != 1 {
+		t.Fatalf("Headroom/upstream calls = %d/%d, want 1/1", headroomCalls.Load(), upstreamCalls.Load())
+	}
+	if response.Header().Get("X-Fantom-Headroom-Status") != "applied" {
+		t.Fatalf("Headroom status = %q", response.Header().Get("X-Fantom-Headroom-Status"))
+	}
+	if response.Header().Get("X-Fantom-Caveman-Mode") != "full" {
+		t.Fatalf("Caveman mode header = %q", response.Header().Get("X-Fantom-Caveman-Mode"))
+	}
+}
