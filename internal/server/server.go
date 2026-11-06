@@ -629,7 +629,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if used { w.Header().Set("X-Fantom-Smart-Selected",candidates[0]) }
 	}
 	if comboStrategy == "round-robin" && len(candidates) > 1 {
-		eligible, deferred := splitHardCompatibleCandidates(candidates,required,state,providerMap)
+		eligible, deferred := s.splitHardCompatibleCandidates(candidates,required,state,providerMap)
 		rotationPool := len(eligible)
 		if rotationPool == 0 {
 			rotationPool = len(candidates)
