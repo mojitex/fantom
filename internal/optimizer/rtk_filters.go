@@ -34,6 +34,7 @@ var (
 	rtkTreeGlyphRE  = regexp.MustCompile("[├└]──|│  ")
 	rtkSearchRE     = regexp.MustCompile("^Result of search in '[^']*' \\(total \\d+ files?\\):")
 	rtkNumberedRE   = regexp.MustCompile("^\\s*\\d+\\|")
+	rtkGrepLineRE   = regexp.MustCompile("^(.+):([0-9]+):(.*)$")
 	rtkDateRE       = regexp.MustCompile("\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+(\\d{4}|\\d{2}:\\d{2})\\s+")
 	rtkWindowsPathRE = regexp.MustCompile("^[A-Za-z]:[\\\\/]")
 )
@@ -44,6 +45,7 @@ type rtkLineMatch struct {
 }
 
 func detectRTKFilter(text string) string {
+	if len(text)<500 || len(text)>10<<20 { return "" }
 	head := text
 	if len(head) > rtkDetectWindow {
 		head = head[:rtkDetectWindow]
@@ -133,25 +135,9 @@ func countRE(re *regexp.Regexp, value string) int {
 }
 
 func parseGrepLine(line string) (rtkLineMatch, string, bool) {
-	first := strings.IndexByte(line, ':')
-	if first <= 0 {
-		return rtkLineMatch{}, "", false
-	}
-	secondRelative := strings.IndexByte(line[first+1:], ':')
-	if secondRelative < 0 {
-		return rtkLineMatch{}, "", false
-	}
-	second := first + 1 + secondRelative
-	number := line[first+1 : second]
-	if number == "" {
-		return rtkLineMatch{}, "", false
-	}
-	for _, r := range number {
-		if r < '0' || r > '9' {
-			return rtkLineMatch{}, "", false
-		}
-	}
-	return rtkLineMatch{lineNumber: number, content: line[second+1:]}, line[:first], true
+	match:=rtkGrepLineRE.FindStringSubmatch(line)
+	if len(match)!=4 || match[1]=="" { return rtkLineMatch{},"",false }
+	return rtkLineMatch{lineNumber:match[2],content:match[3]},match[1],true
 }
 
 func mostlyGitPorcelain(text string) bool {
@@ -254,85 +240,75 @@ func compactGitDiff(input string) string {
 }
 
 func compactGitStatus(input string) string {
-	lines := strings.Split(input, "\n")
-	branch := ""
-	stagedFiles, modifiedFiles, untrackedFiles := []string{}, []string{}, []string{}
-	staged, modified, untracked, conflicts := 0, 0, 0, 0
-	longBranchRE := regexp.MustCompile("^On branch (\\S+)")
-	longFileRE := regexp.MustCompile("^\\s*(modified|new file|deleted|renamed|both modified):\\s+(.+)$")
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, "\r")
-		if strings.TrimSpace(line) == "" {
+	lines:=strings.Split(input,"\n")
+	branch:=""
+	stagedFiles,modifiedFiles,untrackedFiles:=[]string{},[]string{},[]string{}
+	staged,modified,untracked,conflicts:=0,0,0,0
+	section:=""
+	longBranchRE:=regexp.MustCompile("^On branch (\\S+)")
+	longFileRE:=regexp.MustCompile("^\\s*(modified|new file|deleted|renamed|both modified):\\s+(.+)$")
+	for _,raw:=range lines {
+		line:=strings.TrimRight(raw,"\\r")
+		trimmed:=strings.TrimSpace(line)
+		if trimmed=="" {continue}
+		if match:=longBranchRE.FindStringSubmatch(line);len(match)==2 {branch=match[1];section="";continue}
+		if strings.HasPrefix(line,"##") {branch=strings.TrimSpace(strings.TrimPrefix(line,"##"));section="";continue}
+		lower:=strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower,"changes to be committed:"):
+			section="staged";continue
+		case strings.HasPrefix(lower,"changes not staged for commit:"):
+			section="modified";continue
+		case strings.HasPrefix(lower,"untracked files:"):
+			section="untracked";continue
+		case strings.HasPrefix(lower,"unmerged paths:"):
+			section="conflicts";continue
+		case strings.HasPrefix(lower,"nothing to commit"):
+			section="";continue
+		}
+		if len(line)>=3 && rtkPorcelainRE.MatchString(line) {
+			x,y:=line[0],line[1]
+			file:=strings.TrimSpace(line[3:])
+			if x=='?' && y=='?' {untracked++;untrackedFiles=append(untrackedFiles,file);continue}
+			if strings.ContainsRune("MADRC",rune(x)) {staged++;stagedFiles=append(stagedFiles,file)}
+			if x=='U' || y=='U' {conflicts++}
+			if y=='M' || y=='D' {modified++;modifiedFiles=append(modifiedFiles,file)}
 			continue
 		}
-		if match := longBranchRE.FindStringSubmatch(line); len(match) == 2 {
-			branch = match[1]
-			continue
-		}
-		if strings.HasPrefix(line, "##") {
-			branch = strings.TrimSpace(strings.TrimPrefix(line, "##"))
-			continue
-		}
-		if len(line) >= 3 && rtkPorcelainRE.MatchString(line) {
-			x, y := line[0], line[1]
-			file := strings.TrimSpace(line[3:])
-			if x == '?' && y == '?' {
-				untracked++
-				untrackedFiles = append(untrackedFiles, file)
-				continue
-			}
-			if strings.ContainsRune("MADRC", rune(x)) {
-				staged++
-				stagedFiles = append(stagedFiles, file)
-			}
-			if x == 'U' || y == 'U' {
-				conflicts++
-			}
-			if y == 'M' || y == 'D' {
-				modified++
-				modifiedFiles = append(modifiedFiles, file)
-			}
-			continue
-		}
-		if match := longFileRE.FindStringSubmatch(line); len(match) == 3 {
+		if match:=longFileRE.FindStringSubmatch(line);len(match)==3 {
 			switch match[1] {
-			case "both modified":
-				conflicts++
-			case "modified", "deleted":
-				modified++
-				modifiedFiles = append(modifiedFiles, match[2])
-			case "new file", "renamed":
-				staged++
-				stagedFiles = append(stagedFiles, match[2])
+			case "both modified":conflicts++
+			case "modified","deleted":modified++;modifiedFiles=append(modifiedFiles,match[2])
+			case "new file","renamed":staged++;stagedFiles=append(stagedFiles,match[2])
+			}
+			continue
+		}
+		if section!="" && strings.HasPrefix(line," ") && !strings.HasPrefix(trimmed,"(use ") {
+			file:=trimmed
+			switch section {
+			case "staged":staged++;stagedFiles=append(stagedFiles,file)
+			case "modified":modified++;modifiedFiles=append(modifiedFiles,file)
+			case "untracked":untracked++;untrackedFiles=append(untrackedFiles,file)
+			case "conflicts":conflicts++
 			}
 		}
 	}
-	out := []string{}
-	if branch != "" {
-		out = append(out, "* "+branch)
+	out:=[]string{}
+	if branch!="" {out=append(out,"* "+branch)}
+	appendFiles:=func(label string,count int,files []string,limit int){
+		if count==0{return}
+		out=append(out,fmt.Sprintf("%s: %d files",label,count))
+		for _,file:=range files[:minRTK(len(files),limit)] {out=append(out,"   "+file)}
+		if len(files)>limit {out=append(out,fmt.Sprintf("   ... +%d more",len(files)-limit))}
 	}
-	appendFiles := func(label string, count int, files []string, limit int) {
-		if count == 0 {
-			return
-		}
-		out = append(out, fmt.Sprintf("%s: %d files", label, count))
-		for _, file := range files[:minRTK(len(files), limit)] {
-			out = append(out, "   "+file)
-		}
-		if len(files) > limit {
-			out = append(out, fmt.Sprintf("   ... +%d more", len(files)-limit))
-		}
+	appendFiles("+ Staged",staged,stagedFiles,rtkMaxStatusFiles)
+	appendFiles("~ Modified",modified,modifiedFiles,rtkMaxStatusFiles)
+	appendFiles("? Untracked",untracked,untrackedFiles,rtkMaxStatusFiles)
+	if conflicts>0 {out=append(out,fmt.Sprintf("conflicts: %d files",conflicts))}
+	if staged+modified+untracked+conflicts==0 {
+		if strings.Contains(strings.ToLower(input),"nothing to commit") {out=append(out,"clean — nothing to commit")} else {return input}
 	}
-	appendFiles("+ Staged", staged, stagedFiles, rtkMaxStatusFiles)
-	appendFiles("~ Modified", modified, modifiedFiles, rtkMaxStatusFiles)
-	appendFiles("? Untracked", untracked, untrackedFiles, rtkMaxStatusFiles)
-	if conflicts > 0 {
-		out = append(out, fmt.Sprintf("conflicts: %d files", conflicts))
-	}
-	if staged+modified+untracked+conflicts == 0 {
-		out = append(out, "clean — nothing to commit")
-	}
-	return strings.Join(out, "\n")
+	return strings.Join(out,"\n")
 }
 
 func compactGrep(input string) string {
