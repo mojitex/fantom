@@ -68,6 +68,46 @@ func TestProviderRuntimeTryAcquireIsBounded(t *testing.T) {
 	releaseAgain()
 }
 
+
+func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("request unexpectedly reached upstream despite body-budget rejection")
+	}))
+	defer upstream.Close()
+	handler := New(&config.Config{
+		DefaultProvider: "test",
+		GatewayAPIKeys: []string{"client-secret"},
+		MaxRequestBytes: 1 << 20,
+		MaxConcurrentRequests: 4,
+		MaxConcurrentUpstreamRequests: 4,
+		MaxConcurrentPerProvider: 4,
+		MaxInflightBodyBytes: 16,
+		Providers: []config.Provider{{
+			ID: "test", BaseURL: upstream.URL, ChatPath: "/v1/chat/completions",
+			AuthType: "none", Models: []string{"test-model"}, TimeoutSeconds: 5,
+		}},
+		Routes: map[string]config.Route{},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+	request.Header.Set("Authorization", "Bearer client-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("body budget status = %d, want 503: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-Fantom-Admission") != "body-budget" {
+		t.Fatalf("body budget admission header = %q", response.Header().Get("X-Fantom-Admission"))
+	}
+	if response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("body budget Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	}
+}
+
 func TestInferenceAdmissionRejectsAtGlobalLimit(t *testing.T) {
 	assertConcurrentAdmission(t, 1, 4, "global")
 }
