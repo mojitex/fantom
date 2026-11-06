@@ -30,6 +30,10 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 - Optional Headroom integration posts a validated text projection to a configured `/v1/compress` service. It is disabled by default, has a bounded timeout, preserves tool-call identity and media/provider metadata, and fails open to the original request. User-authored message compression requires a separate explicit opt-in.
 - Headroom and Caveman can be configured in Settings or through `FANTOM_HEADROOM_*` and `FANTOM_CAVEMAN_MODE` environment variables. `X-Fantom-Token-Saver: off` bypasses Headroom and RTK for a request; `X-Fantom-Caveman-Mode` can override Caveman per request.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
+- Bounded inference admission: `FANTOM_MAX_CONCURRENT_REQUESTS` (default 256) caps active model requests across the public gateway; `FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS` (default 512) caps Fantom-managed upstream calls including Fusion/Smart fan-out; `FANTOM_MAX_CONCURRENT_PER_PROVIDER` (default 64) caps each configured provider. All are fail-fast limits: saturated traffic receives HTTP 503 with `Retry-After: 1` rather than accumulating in an unbounded application queue. Limits can be tuned for deployment capacity; maximums are 4096, 8192 and 2048 respectively.
+- Inference request bodies across both Fantom Chat Completions and embedded native protocols are bounded by `MAX_REQUEST_MB` (default 32 MiB). Oversized requests return HTTP 413.
+- Streaming usage accounting parses SSE incrementally (maximum line buffer 256 KiB); non-streaming response capture is capped at 512 KiB. Oversized/unparseable usage content is still streamed unchanged, but omitted from usage extraction.
+- Request history retains the newest 5,000 records in a ring buffer. Inference routing snapshots exclude telemetry and client-key history; telemetry persistence serializes and writes a snapshot outside the state lock.
 
 ### Optional Headroom service
 
@@ -83,6 +87,9 @@ Credential failover is bounded to the configured key pool for each route candida
    | `FANTOM_PUBLIC_URL` | Optional | Public management base URL, including `https://`; it does not replace provider-specific loopback OAuth callbacks |
    | `FANTOM_ROUTER_INTERNAL_KEY` | Optional | Fixed private key for the loopback-only embedded runtime; leave empty for a derived key |
    | `FANTOM_TOKEN_SAVER` | Optional | `safe` or `off` |
+   | `FANTOM_MAX_CONCURRENT_REQUESTS` | Optional | Active model requests across Fantom; default `256`, maximum `4096` |
+   | `FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS` | Optional | Total Fantom-managed upstream calls, including Fusion fan-out; default `512`, maximum `8192` |
+   | `FANTOM_MAX_CONCURRENT_PER_PROVIDER` | Optional | Active calls per configured provider; default `64`, maximum `2048` |
    | `FANTOM_CODE_MODE` | Optional | `off`, `lite`, `full` or `ultra` |
 
 4. Attach a Railway **Volume mounted at `/data`** and set `FANTOM_DATA_DIR=/data`. This preserves legacy providers, embedded OAuth credentials, router configuration, secrets, aliases, generated key hashes and request logs across redeploys. Request-history writes are coalesced for up to about one second and flushed on graceful shutdown, keeping routine log I/O off the inference path. A hard process/host crash can still lose the most recent unflushed request records. Without a persistent volume, the container filesystem can be reset by a redeploy.
