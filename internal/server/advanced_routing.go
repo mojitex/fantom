@@ -724,9 +724,9 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		}
 		prompt:="You are the judge in a model-fusion panel. Several expert models independently answered the user's request. Their responses are anonymized below. Identify agreement, resolve contradictions, correct factual or reasoning errors, account for important omissions, and produce one coherent final answer. Do not mention model names or source labels.\n\n"+strings.Join(sourceBlocks,"\n\n")
 		var messages []map[string]any
-		if raw:=payload["messages"];len(raw)>0 {_=json.Unmarshal(raw,&messages)}
+		if raw:=panelPayload["messages"];len(raw)>0 {_=json.Unmarshal(raw,&messages)}
 		messages=append(messages,map[string]any{"role":"user","content":prompt})
-		judgePayload:=clonePayloadWithoutTools(payload)
+		judgePayload:=clonePayloadWithoutTools(panelPayload)
 		encodedMessages,_:=json.Marshal(messages)
 		judgePayload["messages"]=encodedMessages
 		judgePayload["model"],_=json.Marshal(judgeModel)
