@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mojitex/fantom/internal/config"
 )
@@ -109,6 +110,17 @@ func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
 	}
 	if !rows[0].CostKnown || rows[0].CostUSD < 0.00031 || rows[0].CostUSD > 0.00033 {
 		t.Fatalf("smart decision + completion cost not combined: %#v", rows[0])
+	}
+}
+
+func TestSmartSessionCanBeClearedAfterFailover(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("X-Session-ID", "same-session")
+	s.smartSessions.Store("smart-combo:same-session", smartSessionEntry{Model:"primary", UpdatedAt:time.Now()})
+	s.clearSmartSession(req, map[string]json.RawMessage{}, "smart-combo")
+	if _, ok := s.smartSessions.Load("smart-combo:same-session"); ok {
+		t.Fatal("smart session remained locked after failover")
 	}
 }
 
