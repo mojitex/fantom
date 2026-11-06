@@ -29,6 +29,7 @@ func TestRequiredCapabilitiesUsesLatestUserTurn(t *testing.T) {
 func TestModelCapabilitiesAndCapacityAdapterResolution(t *testing.T) {
 	provider := config.Provider{
 		ID: "main",
+		Models: []string{"text-model", "vision-model", "adapter-model"},
 		ModelCapabilities: map[string]config.ModelCapabilities{
 			"vision-model": {Vision: false, Tools: false, ContextWindow: 8192, MaxOutput: 2048},
 			"adapter-model": {Vision: true, Tools: true},
