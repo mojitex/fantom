@@ -161,6 +161,14 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		if strings.TrimSpace(alias)=="" { return errors.New("model alias cannot be empty") }
 		if !providers[route.Provider] { return fmt.Errorf("route %q references unknown provider %q",alias,route.Provider) }
 		if strings.TrimSpace(route.UpstreamModel)=="" { return fmt.Errorf("route %q needs an upstream model",alias) }
+		strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
+		if strategy == "" {
+			strategy = "fallback"
+		}
+		if strategy != "fallback" && strategy != "round-robin" {
+			return fmt.Errorf("route %q has unsupported strategy %q (use fallback or round-robin)", alias, strategy)
+		}
+		route.Strategy = strategy
 		cleanFallbacks:=make([]string,0,len(route.FallbackModels))
 		for _,fallback:=range route.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
