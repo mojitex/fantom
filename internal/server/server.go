@@ -1164,6 +1164,12 @@ func applyProviderUsage(record *requestRecord, values usageValues) {
 }
 
 func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		parser := &sseUsageParser{record: record}
+		parser.feed(body)
+		parser.finish()
+		return
+	}
 	var envelope struct {
 		Usage   usageValues `json:"usage"`
 		Message struct {
