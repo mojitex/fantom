@@ -29,6 +29,10 @@ func (s *Server) AttachCore(core CoreRouter) {
 	if err := s.syncCoreProviders(); err != nil {
 		s.logger.Warn("initial provider synchronization into embedded router failed", "error", err)
 	}
+	usageCtx, cancel := context.WithCancel(context.Background())
+	s.coreUsageCancel = cancel
+	s.coreUsageDone = make(chan struct{})
+	go s.runCoreUsageCollector(usageCtx, s.coreUsageDone)
 }
 
 // syncCoreProviders mirrors Fantom's configured OpenAI-compatible providers into
