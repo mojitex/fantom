@@ -112,6 +112,9 @@ func compactToolOutput(value string) string {
 			return compact.String()
 		}
 	}
+	if filtered := autoCompactRTK(clean); filtered != "" && len(filtered) < len(clean) {
+		return filtered
+	}
 	clean = terminalLines(clean)
 	lines := strings.Split(clean, "\n")
 	out := make([]string, 0, len(lines))
