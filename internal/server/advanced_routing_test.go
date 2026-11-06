@@ -65,6 +65,33 @@ func TestModelCapabilitiesAndCapacityAdapterResolution(t *testing.T) {
 	}
 }
 
+func TestCapacityAdapterHistoryTrimmingPreservesInstructionsAndCurrentMedia(t *testing.T) {
+	messages:=make([]map[string]any,0,16)
+	messages=append(messages,map[string]any{"role":"system","content":strings.Repeat("S",100)})
+	for i:=0;i<7;i++ {
+		messages=append(messages,map[string]any{"role":"user","content":strings.Repeat("U",500)})
+		messages=append(messages,map[string]any{"role":"assistant","content":strings.Repeat("A",500)})
+	}
+	messages=append(messages,map[string]any{"role":"user","content":[]any{map[string]any{"type":"image_url","image_url":map[string]any{"url":"data:image/png;base64,AAAA"}}}})
+	raw,_:=json.Marshal(messages)
+	payload:=map[string]json.RawMessage{"messages":raw}
+	trimmed,dropped:=stripHistoryForContext(payload,700)
+	if dropped==0 {t.Fatal("expected oversized middle history to be trimmed")}
+	var result []map[string]any
+	if err:=json.Unmarshal(trimmed["messages"],&result);err!=nil {t.Fatalf("decode trimmed messages: %v",err)}
+	if len(result)<2 || result[0]["role"]!="system" || result[len(result)-1]["role"]!="user" {
+		t.Fatalf("system/current user context was not preserved: %#v",result)
+	}
+	last:=result[len(result)-1]
+	content,_:=last["content"].([]any)
+	if len(content)!=1 || content[0].(map[string]any)["type"]!="image_url" {
+		t.Fatalf("current-turn media block was lost: %#v",last)
+	}
+	if again,removed:=stripHistoryForContext(trimmed,700);removed!=0 || len(again["messages"])==0 {
+		t.Fatalf("second history trim should be idempotent: removed=%d",removed)
+	}
+}
+
 func TestCapacityAdapterLegacyArrayMigrationAndRoundRobinPool(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	var state adminState
