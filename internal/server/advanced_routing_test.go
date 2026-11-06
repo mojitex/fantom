@@ -457,3 +457,82 @@ func TestChatAppliesHeadroomAndCavemanWithoutChangingUserText(t *testing.T) {
 		t.Fatalf("Caveman mode header = %q", response.Header().Get("X-Fantom-Caveman-Mode"))
 	}
 }
+
+
+func TestAdvancedTokenSaverSettingsPersistAndValidate(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	cfg := &config.Config{
+		DefaultProvider: "main",
+		DefaultTokenSaver: "safe",
+		DefaultCodeMode: "off",
+		DefaultCavemanMode: "lite",
+		HeadroomEnabled: false,
+		HeadroomURL: "http://localhost:8787",
+		HeadroomTimeoutSeconds: 3,
+		Providers: []config.Provider{{
+			ID: "main", BaseURL: "https://provider.example/v1", AuthType: "none", Models: []string{"*"},
+		}},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := newAdminStore(cfg, logger)
+	if err != nil { t.Fatalf("newAdminStore() error = %v", err) }
+
+	if err := store.setAdvancedSettings("main","safe","full","ultra",true,"http://headroom.internal:8787/base",7,true); err != nil {
+		t.Fatalf("setAdvancedSettings() error = %v",err)
+	}
+	state:=store.snapshot()
+	if state.DefaultCavemanMode!="ultra" || !state.HeadroomEnabled || state.HeadroomURL!="http://headroom.internal:8787/base" ||
+		state.HeadroomTimeoutSeconds!=7 || !state.HeadroomCompressUserMessages || !state.HeadroomSettingsConfigured {
+		t.Fatalf("advanced token saver settings were not persisted: %#v",state)
+	}
+	if err:=store.setAdvancedSettings("main","safe","off","invalid",true,"http://headroom.internal:8787",3,false);err==nil {
+		t.Fatal("invalid Caveman mode was accepted")
+	}
+	if err:=store.setAdvancedSettings("main","safe","off","full",true,"ftp://headroom.internal:8787",3,false);err==nil {
+		t.Fatal("non-HTTP Headroom URL was accepted")
+	}
+	if err:=store.setAdvancedSettings("main","safe","off","full",true,"http://headroom.internal:8787",31,false);err==nil {
+		t.Fatal("Headroom timeout above 30 seconds was accepted")
+	}
+	state=store.snapshot()
+	if state.DefaultCavemanMode!="ultra" || state.HeadroomURL!="http://headroom.internal:8787/base" {
+		t.Fatalf("rejected update partially changed settings: %#v",state)
+	}
+	store.Close()
+
+	reloaded,err:=newAdminStore(cfg,logger)
+	if err!=nil {t.Fatalf("reload persisted state: %v",err)}
+	defer reloaded.Close()
+	state=reloaded.snapshot()
+	if state.DefaultCavemanMode!="ultra" || !state.HeadroomEnabled || state.HeadroomTimeoutSeconds!=7 || !state.HeadroomCompressUserMessages {
+		t.Fatalf("Headroom/Caveman settings did not survive restart: %#v",state)
+	}
+}
+
+func TestLegacyAdminStateInheritsHeadroomDefaultsOnlyOnce(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR",t.TempDir())
+	logger:=slog.New(slog.NewTextHandler(io.Discard,nil))
+	cfg:=&config.Config{
+		DefaultProvider:"main",DefaultTokenSaver:"safe",DefaultCodeMode:"off",DefaultCavemanMode:"full",
+		HeadroomEnabled:true,HeadroomURL:"http://localhost:8787",HeadroomTimeoutSeconds:4,
+		Providers:[]config.Provider{{ID:"main",BaseURL:"https://provider.example/v1",AuthType:"none",Models:[]string{"*"}}},
+	}
+	store,err:=newAdminStore(cfg,logger)
+	if err!=nil {t.Fatalf("new store: %v",err)}
+	legacy:=store.snapshot()
+	legacy.HeadroomSettingsConfigured=false
+	legacy.DefaultCavemanMode=""
+	legacy.HeadroomEnabled=false
+	legacy.HeadroomURL=""
+	legacy.HeadroomTimeoutSeconds=0
+	if err:=store.saveLegacyStateForTest(legacy);err!=nil {t.Fatal(err)}
+	store.Close()
+
+	reloaded,err:=newAdminStore(cfg,logger)
+	if err!=nil {t.Fatalf("reload legacy store: %v",err)}
+	defer reloaded.Close()
+	state:=reloaded.snapshot()
+	if !state.HeadroomEnabled || state.HeadroomURL!="http://localhost:8787" || state.HeadroomTimeoutSeconds!=4 || state.DefaultCavemanMode!="full" {
+		t.Fatalf("legacy state did not inherit configured defaults: %#v",state)
+	}
+}
