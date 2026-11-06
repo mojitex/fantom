@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func TestModelCapabilitiesAndCapacityAdapterResolution(t *testing.T) {
 	state := adminState{
 		DefaultProvider: "main",
 		Routes: map[string]config.Route{"text": {Provider: "main", UpstreamModel: "text-model"}},
-		CapacityAdapters: map[string][]string{"vision": {"main/adapter-model"}},
+		CapacityAdapters: map[string]capacityAdapterPool{"vision": {Enabled: true, Models: []string{"main/adapter-model"}}},
 	}
 	s := &Server{}
 	injected := s.applyCapacityAdapters([]string{"text"}, requiredCapabilitySet{"vision": true}, state, providers)
@@ -61,6 +62,39 @@ func TestModelCapabilitiesAndCapacityAdapterResolution(t *testing.T) {
 	rotated := rotateCandidatesWithinPrefix([]string{"vision-a", "vision-b", "text"}, 1, 2)
 	if strings.Join(rotated, ",") != "vision-b,vision-a,text" {
 		t.Fatalf("round robin rotated an incompatible fallback: %#v", rotated)
+	}
+}
+
+func TestCapacityAdapterLegacyArrayMigrationAndRoundRobinPool(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	var state adminState
+	legacy := []byte(`{"version":1,"capacity_adapters":{"vision":["main/vision-a","main/vision-b"]}}`)
+	if err := json.Unmarshal(legacy, &state); err != nil {
+		t.Fatalf("legacy capacity adapter array did not decode: %v", err)
+	}
+	pool := state.CapacityAdapters["vision"]
+	if !pool.Enabled || pool.RoundRobin || len(pool.Models) != 2 {
+		t.Fatalf("legacy capacity pool migration = %#v", pool)
+	}
+
+	provider := config.Provider{
+		ID:"main", Models:[]string{"vision-a","vision-b"},
+		ModelCapabilities:map[string]config.ModelCapabilities{
+			"vision-a":{Vision:true},"vision-b":{Vision:true},
+		},
+	}
+	s := &Server{providers:map[string]*providerRuntime{}, capacityCursors:sync.Map{}}
+	s.store = &adminStore{data:adminState{Providers:[]persistedProvider{persistProvider(provider)}}}
+	state = adminState{
+		DefaultProvider:"main",
+		Routes:map[string]config.Route{},
+		CapacityAdapters:map[string]capacityAdapterPool{"vision":{Enabled:true,RoundRobin:true,Models:[]string{"main/vision-a","main/vision-b"}}},
+	}
+	providers:=map[string]config.Provider{"main":provider}
+	first:=s.applyCapacityAdapters([]string{"text"},requiredCapabilitySet{"vision":true},state,providers)
+	second:=s.applyCapacityAdapters([]string{"text"},requiredCapabilitySet{"vision":true},state,providers)
+	if first[0] == second[0] {
+		t.Fatalf("round-robin capacity pool did not rotate: first=%#v second=%#v",first,second)
 	}
 }
 
