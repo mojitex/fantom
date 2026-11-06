@@ -92,12 +92,39 @@ type requestRecord struct {
 	Source            string    `json:"source,omitempty"`
 }
 
+type capacityAdapterPool struct {
+	Enabled    bool     `json:"enabled"`
+	RoundRobin bool     `json:"roundRobin,omitempty"`
+	Models     []string `json:"models"`
+}
+
+// UnmarshalJSON keeps compatibility with the original persisted string-array pools.
+func (p *capacityAdapterPool) UnmarshalJSON(data []byte) error {
+	var legacy []string
+	if len(data)>0 && data[0]=='[' {
+		if err:=json.Unmarshal(data,&legacy);err!=nil{return err}
+		p.Enabled=len(legacy)>0
+		p.Models=append([]string(nil),legacy...)
+		return nil
+	}
+	var value struct {
+		Enabled *bool `json:"enabled"`
+		RoundRobin bool `json:"roundRobin"`
+		Models []string `json:"models"`
+	}
+	if err:=json.Unmarshal(data,&value);err!=nil{return err}
+	p.Enabled=value.Enabled==nil || *value.Enabled
+	p.RoundRobin=value.RoundRobin
+	p.Models=append([]string(nil),value.Models...)
+	return nil
+}
+
 type adminState struct {
 	Version            int                     `json:"version"`
 	DefaultProvider    string                  `json:"default_provider"`
 	Providers          []persistedProvider     `json:"providers"`
 	Routes             map[string]config.Route `json:"routes"`
-	CapacityAdapters   map[string][]string     `json:"capacity_adapters,omitempty"`
+	CapacityAdapters   map[string]capacityAdapterPool `json:"capacity_adapters,omitempty"`
 	DefaultTokenSaver  string                  `json:"default_token_saver"`
 	DefaultCodeMode    string                  `json:"default_code_mode"`
 	ClientKeys         []storedClientKey       `json:"client_keys"`
@@ -124,14 +151,14 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 	store.data = adminState{Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes, DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode}
 	for _, p := range cfg.Providers { store.data.Providers = append(store.data.Providers, persistProvider(p)) }
 	if store.data.Routes == nil { store.data.Routes = map[string]config.Route{} }
-	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string][]string{} }
+	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string]capacityAdapterPool{} }
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		var loaded adminState
 		if decodeErr := json.Unmarshal(raw, &loaded); decodeErr != nil { return nil, fmt.Errorf("decode Fantom state: %w", decodeErr) }
 		if loaded.Version != 1 { return nil, fmt.Errorf("unsupported Fantom state version %d", loaded.Version) }
 		if loaded.Routes == nil { loaded.Routes = map[string]config.Route{} }
-		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string][]string{} }
+		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string]capacityAdapterPool{} }
 		if loaded.DefaultTokenSaver == "" { loaded.DefaultTokenSaver = cfg.DefaultTokenSaver }
 		if loaded.DefaultCodeMode == "" { loaded.DefaultCodeMode = cfg.DefaultCodeMode }
 		if len(loaded.Providers) == 0 { loaded.Providers = store.data.Providers }
@@ -162,8 +189,11 @@ func (d *adminStore) snapshot() adminState {
 	out := d.data
 	out.Providers = append([]persistedProvider(nil), d.data.Providers...)
 	out.Routes = make(map[string]config.Route,len(d.data.Routes)); for k,v := range d.data.Routes { out.Routes[k]=v }
-	out.CapacityAdapters = make(map[string][]string, len(d.data.CapacityAdapters))
-	for capability, models := range d.data.CapacityAdapters { out.CapacityAdapters[capability] = append([]string(nil), models...) }
+	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(d.data.CapacityAdapters))
+	for capability, pool := range d.data.CapacityAdapters {
+		pool.Models = append([]string(nil), pool.Models...)
+		out.CapacityAdapters[capability] = pool
+	}
 	for i := range out.Providers {
 		out.Providers[i].ModelCapabilities = cloneModelCapabilities(out.Providers[i].ModelCapabilities)
 		out.Providers[i].ModelPricing = cloneModelPricing(out.Providers[i].ModelPricing)
@@ -294,19 +324,23 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 	return d.saveLocked()
 }
 
-func (d *adminStore) setCapacityAdapters(adapters map[string][]string) error {
+func (d *adminStore) setCapacityAdapters(adapters map[string]capacityAdapterPool) error {
 	allowed := map[string]bool{"vision":true, "pdf":true, "audio_input":true, "video_input":true}
-	clean := make(map[string][]string, len(adapters))
-	for capability, models := range adapters {
+	clean := make(map[string]capacityAdapterPool, len(adapters))
+	for capability, pool := range adapters {
 		capability = strings.ToLower(strings.TrimSpace(capability))
 		if !allowed[capability] { return fmt.Errorf("unsupported capacity adapter capability %q", capability) }
 		seen := map[string]bool{}
-		for _, model := range models {
+		models := make([]string,0,len(pool.Models))
+		for _, model := range pool.Models {
 			model = strings.TrimSpace(model)
 			if model == "" { return fmt.Errorf("capacity adapter %q contains an empty model", capability) }
-			if !seen[model] { clean[capability] = append(clean[capability], model); seen[model] = true }
-			if len(clean[capability]) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
+			if !seen[model] { models = append(models,model); seen[model] = true }
+			if len(models) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
 		}
+		pool.Models=models
+		if len(models)==0 { pool.Enabled=false }
+		clean[capability]=pool
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
