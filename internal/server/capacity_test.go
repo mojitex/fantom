@@ -30,15 +30,11 @@ func TestUpstreamAdmissionAndWeightedBodyBudget(t *testing.T) {
 		t.Fatal("second upstream admission exceeded the global limit")
 	}
 	releaseUpstream()
-	if _, ok := server.tryAcquireUpstream(); !ok {
+	releaseAgain, ok := server.tryAcquireUpstream()
+	if !ok {
 		t.Fatal("upstream slot was not released")
 	}
-	// Release the verification acquire before testing byte accounting.
-	releaseUpstream, _ = server.tryAcquireUpstream()
-	if releaseUpstream != nil {
-		// The first release above freed one slot; release the slot acquired here.
-		releaseUpstream()
-	}
+	releaseAgain()
 
 	releaseBody, ok := server.tryAcquireBodyBytes(7)
 	if !ok {
