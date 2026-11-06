@@ -657,7 +657,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Fantom-Code-Mode",codeMode)
 
 	if comboStrategy=="fusion" && hasCombo {
-		s.handleFusionChat(w,r,payload,input.Model,primaryRoute,state,providerMap,&record,saverMode,codeMode)
+		fusionRoute:=primaryRoute
+		panel:=s.applyCapacityAdapters(primaryRoute.FusionModels,required,state,providerMap)
+		eligible,_:=s.splitHardCompatibleCandidates(panel,required,state,providerMap)
+		if len(eligible)>0 { panel=eligible }
+		panel=s.reorderByCapabilities(panel,required,state,providerMap)
+		fusionRoute.FusionModels=panel
+		s.handleFusionChat(w,r,payload,input.Model,fusionRoute,state,providerMap,&record,saverMode,codeMode)
 		return
 	}
 
