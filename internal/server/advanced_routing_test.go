@@ -54,6 +54,14 @@ func TestModelCapabilitiesAndCapacityAdapterResolution(t *testing.T) {
 	if err != nil || target.ProviderID != "main" || target.UpstreamModel != "adapter-model" {
 		t.Fatalf("provider/model adapter resolution = %#v, %v", target, err)
 	}
+	eligible, deferred := s.splitHardCompatibleCandidates([]string{"text", "main/adapter-model"}, requiredCapabilitySet{"vision": true}, state, providers)
+	if len(eligible) != 1 || eligible[0] != "main/adapter-model" || len(deferred) != 1 || deferred[0] != "text" {
+		t.Fatalf("hard-compatible candidates were not separated: eligible=%#v deferred=%#v", eligible, deferred)
+	}
+	rotated := rotateCandidatesWithinPrefix([]string{"vision-a", "vision-b", "text"}, 1, 2)
+	if strings.Join(rotated, ",") != "vision-b,vision-a,text" {
+		t.Fatalf("round robin rotated an incompatible fallback: %#v", rotated)
+	}
 }
 
 func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
