@@ -309,6 +309,7 @@ func (s *Server) applyCapacityAdapters(candidates []string, required requiredCap
 	hasHard := false
 	for _, key := range hard { if required[key] { hasHard = true } }
 	if !hasHard || len(candidates) == 0 { return candidates }
+
 	for _, candidate := range candidates {
 		caps := s.candidateCapabilities(candidate, state, providers)
 		satisfied := true
@@ -317,23 +318,33 @@ func (s *Server) applyCapacityAdapters(candidates []string, required requiredCap
 		}
 		if satisfied { return candidates }
 	}
+
 	pool := make([]string, 0)
 	seen := map[string]bool{}
 	for _, key := range hard {
 		if !required[key] { continue }
-		for _, model := range state.CapacityAdapters[key] {
-			if !seen[model] {
-				caps := s.candidateCapabilities(model, state, providers)
-				satisfied := true
-				for _, hardKey := range hard {
-					if required[hardKey] && !capabilityValue(caps, hardKey) { satisfied = false; break }
-				}
-				if satisfied { pool = append(pool, model); seen[model] = true }
+		entry, exists := state.CapacityAdapters[key]
+		if !exists || !entry.Enabled { continue }
+		models := make([]string,0,len(entry.Models))
+		for _, model := range entry.Models {
+			if seen[model] { continue }
+			caps := s.candidateCapabilities(model, state, providers)
+			satisfied := true
+			for _, hardKey := range hard {
+				if required[hardKey] && !capabilityValue(caps, hardKey) { satisfied = false; break }
 			}
+			if satisfied { models = append(models,model); seen[model] = true }
 		}
+		if entry.RoundRobin && len(models)>1 {
+			value,_:=s.capacityCursors.LoadOrStore(key,&atomic.Uint64{})
+			cursor:=value.(*atomic.Uint64)
+			offset:=int((cursor.Add(1)-1)%uint64(len(models)))
+			models=rotateRouteCandidates(models,offset)
+		}
+		pool=append(pool,models...)
 	}
-	if len(pool) == 0 { return candidates }
-	for _, candidate := range candidates { if !seen[candidate] { pool = append(pool, candidate); seen[candidate] = true } }
+	if len(pool)==0 { return candidates }
+	for _,candidate:=range candidates { if !seen[candidate] { pool=append(pool,candidate); seen[candidate]=true } }
 	return pool
 }
 
