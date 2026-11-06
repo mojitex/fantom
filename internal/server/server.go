@@ -735,6 +735,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if response==nil { continue }
+		if candidateIndex > 0 && comboStrategy == "smart" {
+			s.clearSmartSession(r,payload,input.Model)
+		}
 		selectedProvider=provider
 		record.Provider=provider.config.ID
 		selectedUpstreamModel=target.UpstreamModel
@@ -755,6 +758,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	record.FallbackAttempts = modelFallbacks
 
 	if response==nil {
+		if comboStrategy == "smart" {
+			s.clearSmartSession(r,payload,input.Model)
+		}
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
 		if cooldownRetrySeconds > 0 {
