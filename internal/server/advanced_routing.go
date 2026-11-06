@@ -29,6 +29,9 @@ type smartDecision struct {
 	Choice        string             `json:"choice"`
 	Confidence    float64            `json:"confidence"`
 	Probabilities map[string]float64 `json:"probabilities"`
+	Usage         fusionUsage
+	CostUSD       float64
+	CostKnown     bool
 }
 
 type fusionUsage struct {
@@ -354,7 +357,7 @@ func extractPromptText(payload map[string]json.RawMessage, maxChars int) string 
 	return text
 }
 
-func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, candidates []string, state adminState, providers map[string]config.Provider) ([]string, bool) {
+func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, candidates []string, state adminState, providers map[string]config.Provider, record *requestRecord) ([]string, bool) {
 	if route.Strategy != "smart" || len(candidates)<2 { return candidates,false }
 	session:=extractRequestSession(r,payload)
 	key:=""
@@ -374,6 +377,14 @@ func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payl
 	if decisionProvider==nil { return applyStickyDecision(candidates,previous),false }
 	decision:=s.requestSmartDecision(ctx,decisionProvider,route.SmartDecisionModel,payload,candidates,route,providers)
 	if decision==nil { return applyStickyDecision(candidates,previous),false }
+	if record != nil {
+		record.DecisionUsageSeen = decision.Usage.PromptTokens > 0 || decision.Usage.CompletionTokens > 0 || decision.Usage.TotalTokens > 0
+		record.DecisionPromptTokens = decision.Usage.PromptTokens
+		record.DecisionCompletionTokens = decision.Usage.CompletionTokens
+		record.DecisionTotalTokens = decision.Usage.TotalTokens
+		record.DecisionCostUSD = decision.CostUSD
+		record.DecisionCostKnown = decision.CostKnown
+	}
 	choice:=canonicalCandidate(candidates,decision.Choice,state,providers)
 	if choice=="" { return applyStickyDecision(candidates,previous),false }
 
@@ -457,10 +468,19 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 		break
 	}
 	if len(rawResponse)==0 { return nil }
-	var envelope struct { Choices []struct{ Message struct{Content string `json:"content"`} `json:"message"` } `json:"choices"` }
-	if json.Unmarshal(rawResponse,&envelope)!=nil || len(envelope.Choices)==0 { return nil }
+	var envelope struct {
+		Choices []struct{ Message struct{Content string `json:"content"`} `json:"message"` } `json:"choices"`
+		Usage fusionUsage `json:"usage"`
+	}
+	if json.Unmarshal(rawResponse,&envelope)!=nil { return nil }
+	if envelope.Usage.PromptTokens == 0 { envelope.Usage.PromptTokens = envelope.Usage.InputTokens }
+	if envelope.Usage.CompletionTokens == 0 { envelope.Usage.CompletionTokens = envelope.Usage.OutputTokens }
+	if envelope.Usage.TotalTokens == 0 { envelope.Usage.TotalTokens = envelope.Usage.PromptTokens + envelope.Usage.CompletionTokens }
+	decision := &smartDecision{Usage:envelope.Usage}
+	decision.CostUSD, decision.CostKnown = estimateRequestCost(decisionProvider.config, decisionModel, envelope.Usage.PromptTokens, envelope.Usage.CompletionTokens)
+	if len(envelope.Choices)==0 { return decision,nil }
 	content:=extractJSONObject(envelope.Choices[0].Message.Content)
-	if content=="" { return nil }
+	if content=="" { return decision,nil }
 	var parsed struct {
 		Choice string `json:"choice"`
 		Confidence float64 `json:"confidence"`
@@ -471,14 +491,17 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 			Probabilities map[string]float64 `json:"probabilities"`
 		} `json:"route"` } `json:"answers"`
 	}
-	if json.Unmarshal([]byte(content),&parsed)!=nil { return nil }
+	if json.Unmarshal([]byte(content),&parsed)!=nil { return decision,nil }
 	if parsed.Choice=="" {
 		parsed.Choice=parsed.Answers.Route.Choice
 		parsed.Confidence=parsed.Answers.Route.Confidence
 		parsed.Probabilities=parsed.Answers.Route.Probabilities
 	}
-	if parsed.Choice=="" || parsed.Confidence<0 || parsed.Confidence>1 { return nil }
-	return &smartDecision{Choice:parsed.Choice,Confidence:parsed.Confidence,Probabilities:parsed.Probabilities}
+	if parsed.Choice=="" || parsed.Confidence<0 || parsed.Confidence>1 { return decision,nil }
+	decision.Choice=parsed.Choice
+	decision.Confidence=parsed.Confidence
+	decision.Probabilities=parsed.Probabilities
+	return decision,nil
 }
 
 func extractJSONObject(input string) string {
