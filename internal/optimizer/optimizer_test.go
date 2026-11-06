@@ -47,6 +47,35 @@ func TestApplyAddsOptionalCodeMode(t *testing.T) {
 	}
 }
 
+func TestApplyAddsLanguageAwareCavemanModeAndCombinesSystemInstructions(t *testing.T) {
+	request:=map[string]any{
+		"model":"test-model",
+		"messages":[]any{
+			map[string]any{"role":"system","content":"Keep all requested constraints."},
+			map[string]any{"role":"user","content":"Explain this Go error in Persian."},
+		},
+	}
+	raw,_:=json.Marshal(request)
+	optimized,_:=Apply(raw,"off","full","ultra")
+	var got map[string]any
+	if err:=json.Unmarshal(optimized,&got);err!=nil {t.Fatal(err)}
+	messages:=got["messages"].([]any)
+	if len(messages)!=2 {t.Fatalf("Caveman should merge into the existing system message, got %d messages",len(messages))}
+	system:=messages[0].(map[string]any)
+	if system["role"]!="system" {t.Fatalf("first message changed role: %#v",system)}
+	prompt:=system["content"].(string)
+	for _,required:=range []string{"Keep all requested constraints.","maximum safe compression","Preserve the user's dominant language","Do not mention this style"} {
+		if !strings.Contains(prompt,required) {t.Errorf("Caveman system prompt missing %q",required)}
+	}
+	if messages[1].(map[string]any)["content"]!="Explain this Go error in Persian." {t.Fatal("Caveman must not rewrite user content")}
+}
+
+func TestApplyCavemanModeOffIsNoOp(t *testing.T) {
+	raw:=[]byte("{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"Keep exact\"}]}")
+	got,stats:=Apply(raw,"off","off","off")
+	if string(got)!=string(raw) || stats!=(Stats{}) {t.Fatal("disabled Caveman mode must be a no-op")}
+}
+
 func TestApplyOffLeavesBodyUntouched(t *testing.T) {
 	raw := []byte(`{"model":"x","messages":[]}`)
 	got, stats := Apply(raw, "off", "off")
