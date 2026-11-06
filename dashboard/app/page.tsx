@@ -130,12 +130,12 @@ export default function Home(){
    fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),
    strategy:routeStrategy,
    sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0,
-   smart_decision_provider:routeStrategy==="smart"?smartDecisionProvider:"",
+   smart_decision_provider:routeStrategy==="smart"?(smartDecisionProvider||snapshot?.providers?.[0]?.id||""):"",
    smart_decision_model:routeStrategy==="smart"?smartDecisionModel:"",
    smart_policy:routeStrategy==="smart"?smartPolicy:"",
    smart_confidence:routeStrategy==="smart"?Math.min(.95,Math.max(.5,Number(smartConfidence)||.8)):0,
    smart_timeout_seconds:routeStrategy==="smart"?Math.min(30,Math.max(1,Number(smartTimeout)||8)):0,
-   fusion_models:routeStrategy==="fusion"?fusionModels.split(/\\r?\\n|,/).map(x=>x.trim()).filter(Boolean):[],
+   fusion_models:routeStrategy==="fusion"?fusionModels.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean):[],
    judge_model:routeStrategy==="fusion"?judgeModel:"",
    fusion_min_panel:routeStrategy==="fusion"?Math.max(2,Number(fusionMinPanel)||2):0,
    fusion_timeout_seconds:routeStrategy==="fusion"?Math.min(180,Math.max(5,Number(fusionTimeout)||45)):0
@@ -248,10 +248,10 @@ function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestIn
    const data=await request("/api/admin/capacity-adapters");
    const adapters=data.adapters||{};
    setDraft({
-    vision:(adapters.vision||[]).join("\\n"),
-    pdf:(adapters.pdf||[]).join("\\n"),
-    audio_input:(adapters.audio_input||[]).join("\\n"),
-    video_input:(adapters.video_input||[]).join("\\n")
+    vision:(adapters.vision||[]).join("\n"),
+    pdf:(adapters.pdf||[]).join("\n"),
+    audio_input:(adapters.audio_input||[]).join("\n"),
+    video_input:(adapters.video_input||[]).join("\n")
    });
   }catch(e){setError(e instanceof Error?e.message:"Could not load capacity adapter pools");}
   finally{setLoading(false);}
@@ -260,16 +260,16 @@ function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestIn
  async function save(e:FormEvent){
   e.preventDefault();setSaving(true);setError("");setNotice("");
   const adapters=Object.fromEntries(Object.entries(draft).map(([key,value])=>[
-   key,value.split(/\\r?\\n|,/).map(model=>model.trim()).filter(Boolean)
+   key,value.split(/\r?\n|,/).map(model=>model.trim()).filter(Boolean)
   ]));
   try{
    const result=await request("/api/admin/capacity-adapters",{method:"PUT",body:JSON.stringify({adapters})});
    setNotice("Capacity adapter pools saved.");
    setDraft({
-    vision:(result.adapters?.vision||[]).join("\\n"),
-    pdf:(result.adapters?.pdf||[]).join("\\n"),
-    audio_input:(result.adapters?.audio_input||[]).join("\\n"),
-    video_input:(result.adapters?.video_input||[]).join("\\n")
+    vision:(result.adapters?.vision||[]).join("\n"),
+    pdf:(result.adapters?.pdf||[]).join("\n"),
+    audio_input:(result.adapters?.audio_input||[]).join("\n"),
+    video_input:(result.adapters?.video_input||[]).join("\n")
    });
   }catch(e){setError(e instanceof Error?e.message:"Could not save capacity adapter pools");}
   finally{setSaving(false);}
