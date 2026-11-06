@@ -85,6 +85,7 @@ func TestMetricsEndpointRequiresAdministratorKey(t *testing.T) {
 	for _, expected := range []string{
 		"fantom_inference_limit 4",
 		"fantom_upstream_limit 8",
+		"fantom_client_limit_rejections_total 0",
 		"fantom_request_body_bytes_limit 2097152",
 		"fantom_provider_limit{provider=\"test-provider\"} 2",
 	} {
