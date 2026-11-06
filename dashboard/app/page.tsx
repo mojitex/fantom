@@ -4,13 +4,15 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 type Page = "endpoint" | "providers" | "accounts" | "combos" | "usage" | "settings";
-type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string; key_count?:number };
-type Model = { id:string; owned_by?:string };
-type Route = { provider:string; upstream_model:string; fallback_models?:string[]; strategy?:"fallback"|"round-robin"; sticky_limit?:number };
+type ModelCapabilities = { vision?:boolean; pdf?:boolean; audio_input?:boolean; video_input?:boolean; image_output?:boolean; audio_output?:boolean; search?:boolean; tools?:boolean; reasoning?:boolean; context_window?:number; max_output?:number };
+type ModelPricing = { input_per_million_usd:number; output_per_million_usd:number };
+type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string; key_count?:number; model_capabilities?:Record<string,ModelCapabilities>; model_pricing?:Record<string,ModelPricing> };
+type Model = { id:string; owned_by?:string; capabilities?:ModelCapabilities; context_window?:number; max_output?:number };
+type Route = { provider:string; upstream_model:string; fallback_models?:string[]; strategy?:"fallback"|"round-robin"|"smart"|"fusion"; sticky_limit?:number; smart_decision_provider?:string; smart_decision_model?:string; smart_policy?:"smart-switch"|"strict-lock"|"per-turn"; smart_confidence?:number; smart_timeout_seconds?:number; fusion_models?:string[]; judge_model?:string; fusion_min_panel?:number; fusion_timeout_seconds?:number };
 type Key = { id:string; name:string; prefix:string; enabled:boolean; created_at:string };
 type Log = { id:string; at:string; provider:string; model:string; status:number; latency_ms:number; streaming:boolean; prompt_tokens?:number; completion_tokens?:number; total_tokens?:number; upstream_attempts?:number; credential_retries?:number; fallback_attempts?:number; engine?:string; account?:string; ttft_ms?:number; endpoint?:string; source?:string };
-type Usage = { total_requests:number; successful_requests:number; failed_requests:number; avg_latency_ms:number; total_prompt_tokens?:number; total_completion_tokens?:number; total_tokens?:number; by_provider:Record<string,number>; by_model:Record<string,number> };
-type Snapshot = { service:string; version:string; status:string; default_provider:string; providers:Provider[]; routes:Record<string,Route>; settings:{token_saver:string;code_mode:string}; keys:Key[]; usage:Usage; requests:Log[] };
+type Usage = { total_requests:number; successful_requests:number; failed_requests:number; avg_latency_ms:number; total_prompt_tokens?:number; total_completion_tokens?:number; total_tokens?:number; total_estimated_cost_usd?:number; priced_requests?:number; unpriced_requests?:number; cost_coverage_percent?:number; by_provider:Record<string,number>; by_model:Record<string,number> };
+type Snapshot = { service:string; version:string; status:string; default_provider:string; providers:Provider[]; routes:Record<string,Route>; settings:{token_saver:string;code_mode:string;capacity_adapters?:Record<string,string[]>}; keys:Key[]; usage:Usage; requests:Log[] };
 type Credential = {id:string;auth_index:string;name:string;type?:string;provider?:string;email?:string;account?:string;label?:string;status?:string;status_message?:string;disabled?:boolean;unavailable?:boolean;requires_sign_in?:boolean;renewal_state?:string;recovery_stage?:string;quota_blocked?:boolean;access_token_expires_at?:string;last_refresh?:string;next_retry_after?:string;quota?:{observed_at?:string;signals?:Record<string,string>};model_quotas?:Record<string,{observed_at?:string;signals?:Record<string,string>}>};
 const oauthProviders=[{id:"claude",label:"Claude"},{id:"codex",label:"Codex"},{id:"antigravity",label:"Antigravity"},{id:"kimi",label:"Kimi"},{id:"kimi-ai",label:"Kimi AI"},{id:"xai",label:"xAI"},{id:"devin",label:"Devin"},{id:"meta",label:"Meta"}];
 
@@ -70,9 +72,18 @@ export default function Home(){
  const [routeProvider,setRouteProvider]=useState("");
  const [upstreamModel,setUpstreamModel]=useState("");
  const [fallbackModels,setFallbackModels]=useState("");
- const [routeStrategy,setRouteStrategy]=useState<"fallback"|"round-robin">("fallback");
+ const [routeStrategy,setRouteStrategy]=useState<"fallback"|"round-robin"|"smart"|"fusion">("fallback");
  const [stickyLimit,setStickyLimit]=useState("1");
- const [providerForm,setProviderForm]=useState({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100"});
+ const [smartDecisionProvider,setSmartDecisionProvider]=useState("");
+ const [smartDecisionModel,setSmartDecisionModel]=useState("");
+ const [smartPolicy,setSmartPolicy]=useState<"smart-switch"|"strict-lock"|"per-turn">("smart-switch");
+ const [smartConfidence,setSmartConfidence]=useState("0.8");
+ const [smartTimeout,setSmartTimeout]=useState("8");
+ const [fusionModels,setFusionModels]=useState("");
+ const [judgeModel,setJudgeModel]=useState("");
+ const [fusionMinPanel,setFusionMinPanel]=useState("2");
+ const [fusionTimeout,setFusionTimeout]=useState("45");
+ const [providerForm,setProviderForm]=useState({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100",model_capabilities:"{}",model_pricing:"{}"});
  const [settings,setSettings]=useState({default_provider:"nvidia",token_saver:"safe",code_mode:"off"});
 
  const request=useCallback(async(path:string,init:RequestInit={})=>{
@@ -100,9 +111,16 @@ export default function Home(){
  useEffect(()=>{if(apiKey&& !authenticated && !booting && sessionStorage.getItem("fantom-admin-key")===apiKey){void load();}},[apiKey,authenticated,booting,load]);
 
  async function action(fn:()=>Promise<unknown>,success:string){setBusy(true);setError("");setNotice("");try{const result=await fn() as {core_sync_ok?:boolean;core_sync_error?:string}|undefined;setNotice(result?.core_sync_ok===false?success+" · Provider saved, but protocol-runtime sync failed: "+(result.core_sync_error||"unknown error"):success);await load();}catch(e){setError(e instanceof Error?e.message:"Operation failed");}finally{setBusy(false);}}
- function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100"});setShowProviderForm(true);}
- function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_keys:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100)});setShowProviderForm(true);}
- async function saveProvider(e:FormEvent){e.preventDefault();const body={...providerForm,api_keys:providerForm.api_keys.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean),models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");}
+ function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100",model_capabilities:"{}",model_pricing:"{}"});setShowProviderForm(true);}
+ function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_keys:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100),model_capabilities:JSON.stringify(p.model_capabilities||{},null,2),model_pricing:JSON.stringify(p.model_pricing||{},null,2)});setShowProviderForm(true);}
+ async function saveProvider(e:FormEvent){
+  e.preventDefault();
+  let model_capabilities:Record<string,ModelCapabilities>={},model_pricing:Record<string,ModelPricing>={};
+  try{model_capabilities=JSON.parse(providerForm.model_capabilities||"{}");model_pricing=JSON.parse(providerForm.model_pricing||"{}");if(!model_capabilities||Array.isArray(model_capabilities)||typeof model_capabilities!=="object"||!model_pricing||Array.isArray(model_pricing)||typeof model_pricing!=="object")throw new Error("Metadata must be a JSON object.");}
+  catch(error){setError("Invalid model metadata JSON: "+(error instanceof Error?error.message:"invalid JSON"));return;}
+  const body={...providerForm,model_capabilities,model_pricing,api_keys:providerForm.api_keys.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean),models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};
+  await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");
+}
  async function testProvider(id:string){setBusy(true);setError("");try{const data=await request("/api/admin/providers/"+encodeURIComponent(id)+"/test",{method:"POST",body:"{}"});setNotice(data.ok?"Chat test passed · "+data.test_model+" · "+data.latency_ms+" ms":"Chat test failed · "+(data.error||data.message)+" · HTTP "+(data.chat_status||data.http_status||"—"));}catch(e){setError(e instanceof Error?e.message:"Connection test failed");}finally{setBusy(false);}}
  async function refreshModelCatalog(){setBusy(true);setError("");try{await request("/api/admin/models/refresh",{method:"POST"});await load();}catch(e){setError(e instanceof Error?e.message:"Could not refresh model catalog");}finally{setBusy(false);}}
  async function saveRoute(e:React.FormEvent){e.preventDefault();const next={...(snapshot?.routes||{}),[alias]:{provider:routeProvider,upstream_model:upstreamModel,fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),strategy:routeStrategy,sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0}};await action(async()=>{await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});setAlias("");setUpstreamModel("");setFallbackModels("");setRouteStrategy("fallback");setStickyLimit("1");},"Combo saved");}
