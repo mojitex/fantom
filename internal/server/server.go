@@ -601,7 +601,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if comboStrategy == "round-robin" && len(candidates) > 1 {
 		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
 		cursor := value.(*atomic.Uint64)
-		offset := int((cursor.Add(1) - 1) % uint64(len(candidates)))
+		stickyLimit := state.Routes[input.Model].StickyLimit
+		offset := roundRobinCandidateOffset(cursor, stickyLimit, len(candidates))
 		candidates = rotateRouteCandidates(candidates, offset)
 	}
 
@@ -740,6 +741,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // rotateRouteCandidates returns a new ordered candidate slice beginning at offset.
 // The original ordering is retained for the ordinary sequential fallback strategy.
+func roundRobinCandidateOffset(cursor *atomic.Uint64, stickyLimit, candidateCount int) int {
+	if cursor == nil || candidateCount < 2 {
+		return 0
+	}
+	if stickyLimit < 1 {
+		stickyLimit = 1
+	}
+	requestIndex := cursor.Add(1) - 1
+	return int((requestIndex / uint64(stickyLimit)) % uint64(candidateCount))
+}
+
 func rotateRouteCandidates(candidates []string, offset int) []string {
 	if len(candidates) < 2 {
 		return candidates
