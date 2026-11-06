@@ -174,6 +174,15 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 			return fmt.Errorf("route %q has unsupported strategy %q (use fallback or round-robin)", alias, strategy)
 		}
 		route.Strategy = strategy
+		if route.StickyLimit < 0 || route.StickyLimit > 10000 {
+			return fmt.Errorf("route %q sticky limit must be between 0 and 10000", alias)
+		}
+		if strategy == "round-robin" && route.StickyLimit == 0 {
+			route.StickyLimit = 1
+		}
+		if strategy == "fallback" {
+			route.StickyLimit = 0
+		}
 		cleanFallbacks:=make([]string,0,len(route.FallbackModels))
 		for _,fallback:=range route.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
