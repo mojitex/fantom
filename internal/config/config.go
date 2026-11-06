@@ -74,6 +74,7 @@ type Config struct {
 	MaxConcurrentUpstreamRequests int     `json:"-"`
 	MaxInflightBodyBytes int64              `json:"-"`
 	MaxConcurrentPerProvider int         `json:"-"`
+	MaxConcurrentPerClient int            `json:"-"`
 	DefaultTokenSaver             string `json:"-"`
 	DefaultCodeMode               string `json:"-"`
 	DefaultCavemanMode            string `json:"-"`
@@ -135,6 +136,10 @@ func Load() (*Config, error) {
 	cfg.MaxConcurrentPerProvider = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", 64)
 	if cfg.MaxConcurrentPerProvider > 2048 {
 		return nil, errors.New("FANTOM_MAX_CONCURRENT_PER_PROVIDER cannot exceed 2048")
+	}
+	cfg.MaxConcurrentPerClient = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_PER_CLIENT", 32)
+	if cfg.MaxConcurrentPerClient > 1024 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_PER_CLIENT cannot exceed 1024")
 	}
 	cfg.DefaultTokenSaver = strings.ToLower(envOr("FANTOM_TOKEN_SAVER", "safe"))
 	if cfg.DefaultTokenSaver != "safe" {
