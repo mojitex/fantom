@@ -349,6 +349,103 @@ func (s *Server) applyCapacityAdapters(candidates []string, required requiredCap
 	return pool
 }
 
+func isCapacityAdapterModel(candidate string, required requiredCapabilitySet, state adminState) bool {
+	for capability, needed := range required {
+		if !needed { continue }
+		pool, ok := state.CapacityAdapters[capability]
+		if !ok || !pool.Enabled { continue }
+		for _, model := range pool.Models {
+			if model == candidate { return true }
+		}
+	}
+	return false
+}
+
+func estimateHistoryContentChars(value any) int {
+	switch item := value.(type) {
+	case string:
+		return len(item)
+	case []any:
+		total:=0
+		for _, child:=range item { total+=estimateHistoryContentChars(child) }
+		return total
+	case map[string]any:
+		total:=0
+		for key, child:=range item {
+			if key=="text" || key=="content" || key=="parts" {
+				total+=estimateHistoryContentChars(child)
+			} else if nested,ok:=child.(map[string]any);ok {
+				total+=estimateHistoryContentChars(nested)
+			} else if nested,ok:=child.([]any);ok {
+				total+=estimateHistoryContentChars(nested)
+			}
+		}
+		return total
+	default:
+		return 0
+	}
+}
+
+// stripHistoryForContext keeps system instructions and the current user turn,
+// drops only middle history, and budgets at 80% of the explicit model context.
+// It is a no-op when the history is already within budget or no context limit
+// is known. Media in the trailing user turn is never removed.
+func stripHistoryForContext(payload map[string]json.RawMessage, contextWindow int) (map[string]json.RawMessage, int) {
+	if contextWindow<=0 { return payload,0 }
+	keys:=[]string{"messages","input","contents"}
+	selected:=""
+	var items []any
+	for _,key:=range keys {
+		raw:=payload[key]
+		if len(raw)==0 { continue }
+		if json.Unmarshal(raw,&items)==nil && len(items)>0 { selected=key;break }
+	}
+	if selected=="" { return payload,0 }
+
+	isSystem:=func(role string)bool{return role=="system"||role=="developer"}
+	isAssistant:=func(role string)bool{return role=="assistant"||role=="model"}
+	roleOf:=func(item any)string{
+		m,ok:=item.(map[string]any);if !ok{return ""}
+		role,_:=m["role"].(string);return role
+	}
+	systems:=make([]any,0)
+	rest:=make([]any,0)
+	for _,item:=range items {
+		if isSystem(roleOf(item)) { systems=append(systems,item) } else { rest=append(rest,item) }
+	}
+	lastAssistant:=-1
+	for i,item:=range rest { if isAssistant(roleOf(item)) { lastAssistant=i } }
+	if lastAssistant<0 { return payload,0 }
+	head:=append([]any(nil),rest[:lastAssistant+1]...)
+	tail:=append([]any(nil),rest[lastAssistant+1:]...)
+	if len(head)<=6 { return payload,0 }
+	keptHead:=append([]any(nil),head[:6]...)
+	countChars:=func(values []any)int{
+		total:=0
+		for _,item:=range values { total+=estimateHistoryContentChars(item) }
+		return total
+	}
+	budgetChars:=int(float64(contextWindow)*0.8*4)
+	total:=countChars(systems)+countChars(keptHead)+countChars(tail)
+	for total>budgetChars && len(keptHead)>0 {
+		removed:=keptHead[len(keptHead)-1]
+		keptHead=keptHead[:len(keptHead)-1]
+		total-=estimateHistoryContentChars(removed)
+	}
+	removedCount:=len(items)-(len(systems)+len(keptHead)+len(tail))
+	if removedCount<=0 { return payload,0 }
+	out:=make(map[string]json.RawMessage,len(payload))
+	for key,value:=range payload { out[key]=value }
+	updated:=make([]any,0,len(systems)+len(keptHead)+len(tail))
+	updated=append(updated,systems...)
+	updated=append(updated,keptHead...)
+	updated=append(updated,tail...)
+	encoded,err:=json.Marshal(updated)
+	if err!=nil { return payload,0 }
+	out[selected]=encoded
+	return out,removedCount
+}
+
 func extractRequestSession(r *http.Request, payload map[string]json.RawMessage) string {
 	for _, header := range []string{"X-OpenCode-Session", "X-Session-ID", "X-Conversation-ID", "X-Request-Session"} {
 		value := strings.TrimSpace(r.Header.Get(header))
