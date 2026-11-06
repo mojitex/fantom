@@ -11,10 +11,10 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 - A focused dashboard with four primary destinations: Endpoint & Key, Providers, Combos and Usage. Searchable model discovery lives inside Providers; the full request explorer lives inside Usage; Settings stays in the sidebar footer.
 - Add, edit, test and remove OpenAI-compatible provider connections directly in the dashboard. Provider changes are applied to the live Go process without rebuilding the image.
 - Provider credentials are persisted in a local state file with restrictive filesystem permissions and are never returned by the management API. Multiple API keys can be configured per provider; requests rotate through healthy credentials, temporarily cool down keys rejected or rate-limited by the upstream, honor a bounded `Retry-After` header and retry another credential before advancing to a model fallback. When every key is cooling down and no alternate route can serve the model, Fantom returns `503` with `Retry-After` instead of repeatedly hitting a throttled key.
-- Model aliases map a stable client-facing ID to an upstream provider and model. Ordered fallback aliases are attempted only for classified transient/authentication/billing responses.
+- Model aliases map a stable client-facing ID to an upstream provider and model. Each Combo supports **Sequential Fallback** or **Round Robin + Failover**. Sequential Fallback always starts at the primary model; Round Robin rotates the first-choice model across requests, then attempts the remaining models in order if the selected candidate fails. Only classified authentication, billing, rate-limit and transient upstream failures trigger model failover. Existing persisted routes without a strategy default to Sequential Fallback.
 - Generate and revoke client API keys. Generated keys are only displayed once and stored as SHA-256 hashes.
 - Request history and provider/model/latency aggregates (last 5,000 requests), including provider-reported prompt/completion/total tokens when returned by the upstream (JSON and SSE).
-- Default provider, token saver and code-mode settings are stored persistently.
+- Default provider, token saver and code-mode settings are stored persistently. Combo strategy and the per-combo rotation cursor are safe for concurrent inference requests; cursor state is process-local and starts fresh after restart.
 
 ### Gateway runtime
 - `GET /v1/models` and `POST /v1/chat/completions`.
@@ -94,7 +94,7 @@ All endpoints below require `Authorization: Bearer YOUR_GATEWAY_KEY`.
 | POST | `/api/admin/providers/{id}/test` | Run a live chat-completions smoke test (also reports model-catalog status) |
 | POST | `/api/admin/models/refresh` | Invalidate provider model-catalog caches |
 | POST | `/api/admin/models/refresh` | Invalidate cached provider model catalogs |
-| GET / PUT | `/api/admin/routes` | Read or replace model aliases and ordered fallback chains |
+| GET / PUT | `/api/admin/routes` | Read or replace model aliases, fallback chains and per-combo strategies |
 | GET / POST | `/api/admin/keys` | List keys or create a one-time secret |
 | DELETE | `/api/admin/keys/{id}` | Revoke a generated key |
 | GET | `/api/admin/usage` | Aggregated request metrics |
