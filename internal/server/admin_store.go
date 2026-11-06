@@ -61,6 +61,11 @@ type requestRecord struct {
 	UpstreamAttempts int       `json:"upstream_attempts,omitempty"`
 	CredentialRetries int      `json:"credential_retries,omitempty"`
 	FallbackAttempts int       `json:"fallback_attempts,omitempty"`
+	Engine           string    `json:"engine,omitempty"`
+	Account           string    `json:"account,omitempty"`
+	TTFTMS            int64     `json:"ttft_ms,omitempty"`
+	Endpoint          string    `json:"endpoint,omitempty"`
+	Source            string    `json:"source,omitempty"`
 }
 
 type adminState struct {
@@ -161,6 +166,23 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		if strings.TrimSpace(alias)=="" { return errors.New("model alias cannot be empty") }
 		if !providers[route.Provider] { return fmt.Errorf("route %q references unknown provider %q",alias,route.Provider) }
 		if strings.TrimSpace(route.UpstreamModel)=="" { return fmt.Errorf("route %q needs an upstream model",alias) }
+		strategy := strings.ToLower(strings.TrimSpace(route.Strategy))
+		if strategy == "" {
+			strategy = "fallback"
+		}
+		if strategy != "fallback" && strategy != "round-robin" {
+			return fmt.Errorf("route %q has unsupported strategy %q (use fallback or round-robin)", alias, strategy)
+		}
+		route.Strategy = strategy
+		if route.StickyLimit < 0 || route.StickyLimit > 10000 {
+			return fmt.Errorf("route %q sticky limit must be between 0 and 10000", alias)
+		}
+		if strategy == "round-robin" && route.StickyLimit == 0 {
+			route.StickyLimit = 1
+		}
+		if strategy == "fallback" {
+			route.StickyLimit = 0
+		}
 		cleanFallbacks:=make([]string,0,len(route.FallbackModels))
 		for _,fallback:=range route.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
@@ -184,16 +206,23 @@ func (d *adminStore) setSettings(defaultProvider, saver, code string) error {
 	return d.saveLocked()
 }
 func (d *adminStore) appendRequest(row requestRecord) {
+	d.appendRequests([]requestRecord{row})
+}
+
+// appendRequests adds one logical batch to the bounded history and wakes the
+// coalescing persistence worker only once for the entire batch.
+func (d *adminStore) appendRequests(rows []requestRecord) {
+	if d == nil || len(rows) == 0 {
+		return
+	}
 	d.mu.Lock()
-	d.data.Requests = append(d.data.Requests, row)
+	d.data.Requests = append(d.data.Requests, rows...)
 	if len(d.data.Requests) > 5000 {
 		d.data.Requests = append([]requestRecord(nil), d.data.Requests[len(d.data.Requests)-5000:]...)
 	}
 	d.dirty = true
 	d.mu.Unlock()
 
-	// Request logging must not put a synchronous disk write on the inference path.
-	// The worker coalesces bursts and flushes at most once per second.
 	if d.flushWake != nil {
 		select {
 		case d.flushWake <- struct{}{}:

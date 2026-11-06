@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +37,9 @@ type Model struct {
 type Engine struct {
 	service    *cliproxy.Service
 	cancel     context.CancelFunc
-	apiKey     string
-	configPath string
+	apiKey         string
+	managementKey string
+	configPath     string
 	baseURL    *url.URL
 	syncMu     sync.Mutex
 	apiProxy   *httputil.ReverseProxy
@@ -200,6 +203,7 @@ func New(adminKey string) (*Engine, error) {
 	return &Engine{
 		service: service,
 		apiKey: internalKey,
+		managementKey: adminKey,
 		configPath: configPath,
 		baseURL: target,
 		apiProxy: apiProxy,
@@ -332,6 +336,40 @@ func (e *Engine) Models(ctx context.Context) ([]Model, error) {
 	result := append([]Model(nil), e.cached...)
 	e.mu.Unlock()
 	return result, nil
+}
+
+// UsageQueue drains normalized usage events from the embedded management API.
+// The SDK queue is destructive, so callers should persist returned records promptly.
+func (e *Engine) UsageQueue(ctx context.Context, count int) ([]json.RawMessage, error) {
+	if e == nil || e.baseURL == nil {
+		return nil, errors.New("embedded usage engine is unavailable")
+	}
+	if count <= 0 {
+		count = 100
+	}
+	if count > 500 {
+		count = 500
+	}
+	endpoint := e.baseURL.String() + "/v8/management/observability/usage/queue?count=" + strconv.Itoa(count)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create embedded usage request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+e.managementKey)
+	response, err := e.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("read embedded usage queue: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("embedded usage queue returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var records []json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&records); err != nil {
+		return nil, fmt.Errorf("decode embedded usage queue: %w", err)
+	}
+	return records, nil
 }
 
 func (e *Engine) HasModel(ctx context.Context, id string) bool {

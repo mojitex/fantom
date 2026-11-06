@@ -142,9 +142,12 @@ type Server struct {
 	providers   map[string]*providerRuntime
 	store       *adminStore
 	logger      *slog.Logger
-	handler     http.Handler
-	core        CoreRouter
-	requestID   atomic.Uint64
+	handler       http.Handler
+	core          CoreRouter
+	requestID     atomic.Uint64
+	routeCursors  sync.Map // map[public combo model]*atomic.Uint64
+	coreUsageCancel context.CancelFunc
+	coreUsageDone   chan struct{}
 }
 
 type modelItem struct {
@@ -219,6 +222,12 @@ func (s *Server) Close() {
 	for _, provider := range providers {
 		provider.client.CloseIdleConnections()
 	}
+	if s.coreUsageCancel != nil {
+		s.coreUsageCancel()
+	}
+	if s.coreUsageDone != nil {
+		<-s.coreUsageDone
+	}
 	if s.core != nil {
 		s.core.Close()
 	}
@@ -227,6 +236,108 @@ func (s *Server) Close() {
 	}
 }
 
+// coreUsageEvent is the deliberately small, privacy-safe subset of the
+// embedded runtime's usage record that Fantom retains in its unified history.
+// Credential secrets, token hashes, client IPs and user-agent data are ignored.
+type coreUsageEvent struct {
+	Timestamp  time.Time `json:"timestamp"`
+	LatencyMS  int64     `json:"latency_ms"`
+	TTFTMS     int64     `json:"ttft_ms"`
+	Tokens     struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+		TotalTokens  int64 `json:"total_tokens"`
+	} `json:"tokens"`
+	Failed bool `json:"failed"`
+	Stream bool `json:"stream"`
+	Fail struct {
+		StatusCode int `json:"status_code"`
+	} `json:"fail"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	Alias       string `json:"alias"`
+	AuthIndex   string `json:"auth_index"`
+	Endpoint    string `json:"endpoint"`
+	RequestID   string `json:"request_id"`
+	ExecutionID string `json:"execution_id"`
+	Source      string `json:"source"`
+}
+
+// collectCoreUsageBatch drains SDK usage events and writes only their safe
+// accounting metadata into Fantom's existing persistent request history.
+func (s *Server) collectCoreUsageBatch(ctx context.Context) error {
+	if s == nil || s.core == nil || s.store == nil {
+		return nil
+	}
+	events, err := s.core.UsageQueue(ctx, 100)
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	rows := make([]requestRecord, 0, len(events))
+	for index, raw := range events {
+		var event coreUsageEvent
+		if err := json.Unmarshal(raw, &event); err != nil {
+			s.logger.Warn("skipping malformed embedded usage event", "error", err)
+			continue
+		}
+		at := event.Timestamp
+		if at.IsZero() {
+			at = time.Now().UTC()
+		} else {
+			at = at.UTC()
+		}
+		status := http.StatusOK
+		if event.Failed {
+			status = event.Fail.StatusCode
+			if status < 400 || status > 599 {
+				status = http.StatusBadGateway
+			}
+		}
+		id := strings.TrimSpace(event.ExecutionID)
+		if id == "" {
+			id = strings.TrimSpace(event.RequestID)
+		}
+		if id == "" {
+			id = fmt.Sprintf("cliproxy-%d-%d", at.UnixNano(), index)
+		}
+		model := strings.TrimSpace(event.Alias)
+		if model == "" {
+			model = strings.TrimSpace(event.Model)
+		}
+		totalTokens := event.Tokens.TotalTokens
+		if totalTokens <= 0 {
+			totalTokens = event.Tokens.InputTokens + event.Tokens.OutputTokens
+		}
+		rows = append(rows, requestRecord{
+			ID: id, At: at, Provider: strings.TrimSpace(event.Provider), Model: model,
+			Status: status, LatencyMS: event.LatencyMS, Streaming: event.Stream,
+			PromptTokens: event.Tokens.InputTokens, CompletionTokens: event.Tokens.OutputTokens,
+			TotalTokens: totalTokens, Engine: "cliproxy", Account: strings.TrimSpace(event.AuthIndex),
+			TTFTMS: event.TTFTMS, Endpoint: strings.TrimSpace(event.Endpoint), Source: strings.TrimSpace(event.Source),
+		})
+	}
+	s.store.appendRequests(rows)
+	return nil
+}
+
+func (s *Server) runCoreUsageCollector(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.collectCoreUsageBatch(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Debug("embedded usage collection failed", "error", err)
+			}
+		}
+	}
+}
 func newProviderRuntime(provider config.Provider) *providerRuntime {
 	if provider.ChatPath=="" { provider.ChatPath="/chat/completions" }
 	timeout:=provider.TimeoutSeconds; if timeout<=0 { timeout=100 }
@@ -477,11 +588,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	candidates:=[]string{input.Model}
 	seenCandidates:=map[string]bool{input.Model:true}
+	comboStrategy := "fallback"
 	if primary,ok:=state.Routes[input.Model]; ok {
+		if strings.EqualFold(strings.TrimSpace(primary.Strategy), "round-robin") {
+			comboStrategy = "round-robin"
+		}
 		for _,fallback:=range primary.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
 			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
+	}
+	if comboStrategy == "round-robin" && len(candidates) > 1 {
+		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
+		cursor := value.(*atomic.Uint64)
+		stickyLimit := state.Routes[input.Model].StickyLimit
+		offset := roundRobinCandidateOffset(cursor, stickyLimit, len(candidates))
+		candidates = rotateRouteCandidates(candidates, offset)
 	}
 
 	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
@@ -615,6 +737,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)
 	}
+}
+
+// rotateRouteCandidates returns a new ordered candidate slice beginning at offset.
+// The original ordering is retained for the ordinary sequential fallback strategy.
+func roundRobinCandidateOffset(cursor *atomic.Uint64, stickyLimit, candidateCount int) int {
+	if cursor == nil || candidateCount < 2 {
+		return 0
+	}
+	if stickyLimit < 1 {
+		stickyLimit = 1
+	}
+	requestIndex := cursor.Add(1) - 1
+	return int((requestIndex / uint64(stickyLimit)) % uint64(candidateCount))
+}
+
+func rotateRouteCandidates(candidates []string, offset int) []string {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	offset %= len(candidates)
+	if offset == 0 {
+		return candidates
+	}
+	ordered := make([]string, 0, len(candidates))
+	ordered = append(ordered, candidates[offset:]...)
+	ordered = append(ordered, candidates[:offset]...)
+	return ordered
 }
 
 func shouldRetryCredential(status int) bool {

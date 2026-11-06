@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"sync/atomic"
@@ -13,6 +14,64 @@ import (
 
 	"github.com/mojitex/fantom/internal/config"
 )
+
+type usageQueueCoreStub struct {
+	CoreRouter
+	records []json.RawMessage
+}
+
+func (s *usageQueueCoreStub) UsageQueue(_ context.Context, _ int) ([]json.RawMessage, error) {
+	records := s.records
+	s.records = nil
+	return records, nil
+}
+
+func (s *usageQueueCoreStub) Close() {}
+
+func TestCollectCoreUsageBatchPersistsUnifiedSafeUsageHistory(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	handler := New(&config.Config{Routes: map[string]config.Route{}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	stub := &usageQueueCoreStub{records: []json.RawMessage{
+		json.RawMessage(`{"timestamp":"2026-11-06T09:00:00Z","latency_ms":1200,"ttft_ms":180,"tokens":{"input_tokens":10,"output_tokens":25,"total_tokens":35},"failed":false,"stream":true,"provider":"claude","model":"claude-sonnet","alias":"fast","auth_index":"claude-account-1","request_id":"trace-1","execution_id":"exec-1","endpoint":"/v1/messages","source":"oauth","api_key":"credential-secret","access_token_sha256":"token-hash-secret","client_ip":"192.0.2.10"}`),
+		json.RawMessage(`{"timestamp":"2026-11-06T09:01:00Z","latency_ms":400,"tokens":{"input_tokens":4,"output_tokens":0},"failed":true,"fail":{"status_code":429},"provider":"codex","model":"codex-latest","auth_index":"codex-account-2","execution_id":"exec-2"}`),
+	}}
+	handler.core = stub
+
+	if err := handler.collectCoreUsageBatch(context.Background()); err != nil {
+		t.Fatalf("collectCoreUsageBatch() error = %v", err)
+	}
+	if len(handler.store.snapshot().Requests) != 2 {
+		t.Fatalf("persisted request count = %d, want 2", len(handler.store.snapshot().Requests))
+	}
+
+	rows := handler.store.snapshot().Requests
+	first := rows[0]
+	if first.ID != "exec-1" || first.Model != "fast" || first.Provider != "claude" {
+		t.Fatalf("unexpected normalized usage identity: %#v", first)
+	}
+	if first.Engine != "cliproxy" || first.Account != "claude-account-1" || first.Endpoint != "/v1/messages" {
+		t.Fatalf("runtime/account metadata not retained: %#v", first)
+	}
+	if first.Status != http.StatusOK || first.PromptTokens != 10 || first.CompletionTokens != 25 || first.TotalTokens != 35 {
+		t.Fatalf("usage accounting fields not retained: %#v", first)
+	}
+	if first.TTFTMS != 180 || !first.Streaming {
+		t.Fatalf("stream timing metadata not retained: %#v", first)
+	}
+	if rows[1].Status != http.StatusTooManyRequests || rows[1].Engine != "cliproxy" {
+		t.Fatalf("failed runtime event was not normalized: %#v", rows[1])
+	}
+
+	snapshotJSON, err := json.Marshal(handler.store.snapshot())
+	if err != nil {
+		t.Fatalf("marshal safe request history: %v", err)
+	}
+	if strings.Contains(string(snapshotJSON), "credential-secret") || strings.Contains(string(snapshotJSON), "token-hash-secret") || strings.Contains(string(snapshotJSON), "192.0.2.10") {
+		t.Fatalf("sensitive SDK usage fields leaked into Fantom history: %s", snapshotJSON)
+	}
+}
 
 func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
@@ -176,6 +235,134 @@ func TestAdminProviderCRUDRoutesAndGeneratedKeys(t *testing.T) {
 	if removed.Code != http.StatusOK { t.Fatalf("provider delete = %d: %s", removed.Code, removed.Body.String()) }
 }
 
+
+func TestComboStrategyValidationAndLegacyDefault(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"admin-secret"},
+		Providers: []config.Provider{{
+			ID: "primary", BaseURL: "https://example.invalid/v1",
+			AuthType: "bearer", APIKeys: []string{"provider-secret"},
+			Models: []string{"model-a"}, TimeoutSeconds: 5,
+		}},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"legacy-combo": {Provider: "primary", UpstreamModel: "model-a"},
+		"rr-combo": {Provider: "primary", UpstreamModel: "model-a", Strategy: "ROUND-ROBIN"},
+		"sticky-combo": {Provider: "primary", UpstreamModel: "model-a", Strategy: "round-robin", StickyLimit: 4},
+	}); err != nil {
+		t.Fatalf("setRoutes() rejected supported strategies: %v", err)
+	}
+	routes := handler.store.snapshot().Routes
+	if routes["legacy-combo"].Strategy != "fallback" {
+		t.Fatalf("legacy route strategy = %q, want fallback", routes["legacy-combo"].Strategy)
+	}
+	if routes["rr-combo"].Strategy != "round-robin" || routes["rr-combo"].StickyLimit != 1 {
+		t.Fatalf("round-robin defaults = strategy %q, sticky %d; want round-robin/1", routes["rr-combo"].Strategy, routes["rr-combo"].StickyLimit)
+	}
+	if routes["sticky-combo"].StickyLimit != 4 {
+		t.Fatalf("sticky limit = %d, want 4", routes["sticky-combo"].StickyLimit)
+	}
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"invalid": {Provider: "primary", UpstreamModel: "model-a", Strategy: "smartest"},
+	}); err == nil {
+		t.Fatal("setRoutes() accepted an unsupported combo strategy")
+	}
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"invalid-sticky": {Provider: "primary", UpstreamModel: "model-a", Strategy: "round-robin", StickyLimit: 10001},
+	}); err == nil {
+		t.Fatal("setRoutes() accepted an out-of-range sticky limit")
+	}
+}
+
+func TestRoundRobinCandidateOffsetHonorsStickyLimit(t *testing.T) {
+	var cursor atomic.Uint64
+	want := []int{0, 0, 1, 1, 2, 2, 0, 0}
+	for index, expected := range want {
+		if got := roundRobinCandidateOffset(&cursor, 2, 3); got != expected {
+			t.Fatalf("request %d candidate offset = %d, want %d", index+1, got, expected)
+		}
+	}
+}
+
+func TestRoundRobinComboRotatesCandidates(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+
+	type upstreamCounter struct {
+		model string
+		count atomic.Int64
+	}
+	counters := []*upstreamCounter{
+		{model: "primary-model"},
+		{model: "backup-model-a"},
+		{model: "backup-model-b"},
+	}
+	servers := make([]*httptest.Server, 0, len(counters))
+	providers := make([]config.Provider, 0, len(counters))
+	for index, counter := range counters {
+		counter := counter
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode routed request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if got := payload["model"]; got != counter.model {
+				t.Errorf("upstream model = %#v, want %q", got, counter.model)
+			}
+			counter.count.Add(1)
+			_, _ = io.WriteString(w, `{"id":"round-robin-success","choices":[]}`)
+		}))
+		servers = append(servers, server)
+		defer server.Close()
+		providerID := []string{"primary", "backup-a", "backup-b"}[index]
+		providers = append(providers, config.Provider{
+			ID: providerID, BaseURL: server.URL + "/v1", AuthType: "none",
+			Models: []string{counter.model}, TimeoutSeconds: 5,
+		})
+	}
+
+	cfg := &config.Config{
+		DefaultProvider: "primary",
+		GatewayAPIKeys: []string{"gateway-secret"},
+		MaxRequestBytes: 1 << 20,
+		DefaultTokenSaver: "off",
+		DefaultCodeMode: "off",
+		Providers: providers,
+		Routes: map[string]config.Route{
+			"frontdoor": {
+				Provider: "primary", UpstreamModel: "primary-model",
+				FallbackModels: []string{"backup-a", "backup-b"}, Strategy: "round-robin",
+			},
+			"backup-a": {Provider: "backup-a", UpstreamModel: "backup-model-a"},
+			"backup-b": {Provider: "backup-b", UpstreamModel: "backup-model-b"},
+		},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	for requestIndex := 0; requestIndex < 6; requestIndex++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"frontdoor","messages":[{"role":"user","content":"hello"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("round-robin request %d = %d: %s", requestIndex+1, res.Code, res.Body.String())
+		}
+	}
+	for _, counter := range counters {
+		if got := counter.count.Load(); got != 2 {
+			t.Errorf("provider for %s received %d requests, want 2", counter.model, got)
+		}
+	}
+}
 
 func TestRouteFallbackMovesToNextProviderOnRateLimit(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
