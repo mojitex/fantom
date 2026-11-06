@@ -37,11 +37,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, map[string]any{"adapters": s.store.snapshot().CapacityAdapters})
 		case http.MethodPut:
-			var body struct { Adapters map[string][]string `json:"adapters"` }
+			var body struct { Adapters map[string]capacityAdapterPool `json:"adapters"` }
 			if !decodeAdminJSON(w, r, &body) { return }
-			if body.Adapters == nil { body.Adapters = map[string][]string{} }
+			if body.Adapters == nil { body.Adapters = map[string]capacityAdapterPool{} }
 			if err := s.store.setCapacityAdapters(body.Adapters); err != nil { adminError(w, http.StatusBadRequest, err.Error()); return }
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": body.Adapters})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": s.store.snapshot().CapacityAdapters})
 		default: methodNotAllowed(w)
 		}
 		return
@@ -274,6 +274,8 @@ func tailRequests(items []requestRecord,limit int) []requestRecord {
 func (s *Server) usageSummary(items []requestRecord) map[string]any {
 	var total,success,failed int
 	var latency,promptTokens,completionTokens,totalTokens int64
+	var estimatedCost float64
+	pricedRequests := 0
 	providers:=map[string]int{}
 	models:=map[string]int{}
 	for _,item:=range items {
@@ -281,13 +283,17 @@ func (s *Server) usageSummary(items []requestRecord) map[string]any {
 		promptTokens+=item.PromptTokens
 		completionTokens+=item.CompletionTokens
 		totalTokens+=item.TotalTokens
+		if item.CostKnown { estimatedCost += item.CostUSD; pricedRequests++ }
 		providers[item.Provider]++; models[item.Model]++
 		if item.Status>=200&&item.Status<400 { success++ } else { failed++ }
 	}
 	avg:=int64(0); if total>0 { avg=latency/int64(total) }
+	coverage := 0.0
+	if total > 0 { coverage = float64(pricedRequests) / float64(total) * 100 }
 	return map[string]any{
 		"total_requests":total,"successful_requests":success,"failed_requests":failed,"avg_latency_ms":avg,
 		"total_prompt_tokens":promptTokens,"total_completion_tokens":completionTokens,"total_tokens":totalTokens,
+		"total_estimated_cost_usd":estimatedCost,"priced_requests":pricedRequests,"unpriced_requests":total-pricedRequests,"cost_coverage_percent":coverage,
 		"by_provider":providers,"by_model":models,
 	}
 }

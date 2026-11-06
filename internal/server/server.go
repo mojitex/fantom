@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +21,6 @@ import (
 
 	"github.com/mojitex/fantom/internal/config"
 	"github.com/mojitex/fantom/internal/optimizer"
-	"github.com/mojitex/fantom/internal/routing"
 )
 
 type providerRuntime struct {
@@ -146,14 +146,21 @@ type Server struct {
 	core          CoreRouter
 	requestID     atomic.Uint64
 	routeCursors  sync.Map // map[public combo model]*atomic.Uint64
+	smartSessions sync.Map // map[combo:session]*smartSessionEntry
+	smartSessionSweeps atomic.Uint64
+	capacityCursors sync.Map // map[capability]*atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
 }
 
 type modelItem struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	OwnedBy string `json:"owned_by"`
+	ID            string                   `json:"id"`
+	Object        string                   `json:"object"`
+	OwnedBy       string                   `json:"owned_by"`
+	Capabilities  config.ModelCapabilities `json:"capabilities,omitempty"`
+	ContextWindow int                      `json:"context_window,omitempty"`
+	MaxOutput     int                      `json:"max_output,omitempty"`
+	Pricing       *config.ModelPricing     `json:"pricing,omitempty"`
 }
 
 type upstreamModelList struct {
@@ -445,14 +452,25 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	state:=s.store.snapshot()
 	items:=make([]modelItem,0)
 	seen:=make(map[string]struct{})
+	providerConfigs := s.providerMap(state)
 	for _,saved:=range state.Providers {
 		runtime:=s.providerByID(saved.ID)
 		if runtime==nil { continue }
 		for _,model:=range s.providerModels(r.Context(),runtime) {
-			appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID})
+			caps := modelCapabilities(runtime.config, model, model)
+			item := modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput}
+			if pricing,ok:=runtime.config.ModelPricing[model];ok { item.Pricing=&pricing }
+			appendModel(&items,seen,item)
 		}
 	}
-	for alias,route:=range state.Routes { if s.providerByID(route.Provider)!=nil { appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider}) } }
+	for alias,route:=range state.Routes {
+		if runtime:=s.providerByID(route.Provider); runtime!=nil {
+			caps := s.candidateCapabilities(alias, state, providerConfigs)
+			item := modelItem{ID:alias,Object:"model",OwnedBy:route.Provider,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput}
+			if provider,ok:=providerConfigs[route.Provider];ok { if pricing,ok:=provider.ModelPricing[route.UpstreamModel];ok { item.Pricing=&pricing } }
+			appendModel(&items,seen,item)
+		}
+	}
 	if s.core != nil {
 		coreModels, err := s.core.Models(r.Context())
 		if err != nil {
@@ -461,7 +479,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			for _, model := range coreModels {
 				ownedBy := model.OwnedBy
 				if ownedBy == "" { ownedBy = "cli-proxy-api" }
-				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy})
+				caps := modelCapabilities(config.Provider{ID:ownedBy},model.ID,model.ID)
+				appendModel(&items, seen, modelItem{ID:model.ID,Object:"model",OwnedBy:ownedBy,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
 			}
 		}
 	}
@@ -583,28 +602,50 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state:=s.store.snapshot()
 	record.Model=input.Model
 	record.Streaming=string(payload["stream"])=="true"
-	providerMap:=make(map[string]config.Provider,len(state.Providers))
-	for _,saved:=range state.Providers { p:=saved.runtime(); providerMap[p.ID]=p }
-
+	providerMap:=s.providerMap(state)
 	candidates:=[]string{input.Model}
 	seenCandidates:=map[string]bool{input.Model:true}
 	comboStrategy := "fallback"
-	if primary,ok:=state.Routes[input.Model]; ok {
-		if strings.EqualFold(strings.TrimSpace(primary.Strategy), "round-robin") {
-			comboStrategy = "round-robin"
-		}
-		for _,fallback:=range primary.FallbackModels {
+	primaryRoute, hasCombo := state.Routes[input.Model]
+	if hasCombo {
+		strategy:=strings.ToLower(strings.TrimSpace(primaryRoute.Strategy))
+		if strategy!="" { comboStrategy=strategy }
+		for _,fallback:=range primaryRoute.FallbackModels {
 			fallback=strings.TrimSpace(fallback)
 			if fallback!=""&&!seenCandidates[fallback] { candidates=append(candidates,fallback); seenCandidates[fallback]=true }
 		}
 	}
-	if comboStrategy == "round-robin" && len(candidates) > 1 {
-		value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
-		cursor := value.(*atomic.Uint64)
-		stickyLimit := state.Routes[input.Model].StickyLimit
-		offset := roundRobinCandidateOffset(cursor, stickyLimit, len(candidates))
-		candidates = rotateRouteCandidates(candidates, offset)
+	required:=requiredCapabilities(payload)
+	if len(required)>0 {
+		var names []string
+		for name:=range required { names=append(names,name) }
+		sort.Strings(names)
+		w.Header().Set("X-Fantom-Required-Capabilities",strings.Join(names,","))
 	}
+	candidates=s.applyCapacityAdapters(candidates,required,state,providerMap)
+	candidates=s.reorderByCapabilities(candidates,required,state,providerMap)
+	if comboStrategy=="smart" && hasCombo {
+		var used bool
+		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap,required,&record)
+		if used { w.Header().Set("X-Fantom-Smart-Selected",candidates[0]) }
+	}
+	if comboStrategy == "round-robin" && len(candidates) > 1 {
+		eligible, deferred := s.splitHardCompatibleCandidates(candidates,required,state,providerMap)
+		rotationPool := len(eligible)
+		if rotationPool == 0 {
+			rotationPool = len(candidates)
+		} else if len(deferred) > 0 {
+			candidates = append(append([]string(nil),eligible...),deferred...)
+		}
+		if rotationPool > 1 {
+			value, _ := s.routeCursors.LoadOrStore(input.Model, &atomic.Uint64{})
+			cursor := value.(*atomic.Uint64)
+			stickyLimit := primaryRoute.StickyLimit
+			offset := roundRobinCandidateOffset(cursor, stickyLimit, rotationPool)
+			candidates = rotateCandidatesWithinPrefix(candidates,offset,rotationPool)
+		}
+	}
+	record.RoutingStrategy=comboStrategy
 
 	saverMode:=r.Header.Get("X-Fantom-Token-Saver")
 	if strings.TrimSpace(saverMode)=="" { saverMode=state.DefaultTokenSaver }
@@ -615,15 +656,27 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Fantom-Token-Saver",saverMode)
 	w.Header().Set("X-Fantom-Code-Mode",codeMode)
 
+	if comboStrategy=="fusion" && hasCombo {
+		fusionRoute:=primaryRoute
+		panel:=s.applyCapacityAdapters(primaryRoute.FusionModels,required,state,providerMap)
+		eligible,_:=s.splitHardCompatibleCandidates(panel,required,state,providerMap)
+		if len(eligible)>0 { panel=eligible }
+		panel=s.reorderByCapabilities(panel,required,state,providerMap)
+		fusionRoute.FusionModels=panel
+		s.handleFusionChat(w,r,payload,input.Model,fusionRoute,state,providerMap,&record,saverMode,codeMode)
+		return
+	}
+
 	var response *http.Response
 	var lastErr error
 	var selectedProvider *providerRuntime
+	selectedUpstreamModel:=""
 	attempts:=0
 	modelFallbacks:=0
 	credentialRetries:=0
 	cooldownRetrySeconds:=0
 	for candidateIndex,candidateModel:=range candidates {
-		target,resolveErr:=routing.Resolve(candidateModel,state.Routes,state.DefaultProvider,providerMap)
+		target,resolveErr:=resolveCandidate(candidateModel,state,providerMap)
 		if resolveErr!=nil { lastErr=resolveErr; continue }
 		provider:=s.providerByID(target.ProviderID)
 		if candidateIndex > 0 { modelFallbacks++ }
@@ -633,6 +686,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		for name,value:=range payload { attemptPayload[name]=value }
 		modelJSON,_:=json.Marshal(target.UpstreamModel)
 		attemptPayload["model"]=modelJSON
+		if isCapacityAdapterModel(candidateModel,required,state) {
+			caps:=s.candidateCapabilities(candidateModel,state,providerMap)
+			trimmed,removed:=stripHistoryForContext(attemptPayload,caps.ContextWindow)
+			if removed>0 {
+				attemptPayload=trimmed
+				w.Header().Set("X-Fantom-Capacity-History-Messages-Dropped",fmt.Sprint(removed))
+			}
+		}
 		attemptBody,marshalErr:=json.Marshal(attemptPayload)
 		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
 		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
@@ -698,8 +759,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if response==nil { continue }
+		if candidateIndex > 0 && comboStrategy == "smart" {
+			s.clearSmartSession(r,payload,input.Model)
+		}
 		selectedProvider=provider
 		record.Provider=provider.config.ID
+		selectedUpstreamModel=target.UpstreamModel
+		record.UpstreamModel=target.UpstreamModel
 		break
 	}
 	if attempts > 0 {
@@ -716,6 +782,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	record.FallbackAttempts = modelFallbacks
 
 	if response==nil {
+		if comboStrategy == "smart" {
+			s.clearSmartSession(r,payload,input.Model)
+			mergeSmartDecisionUsage(&record)
+		}
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
 		if cooldownRetrySeconds > 0 {
@@ -733,6 +803,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	copyResponseHeaders(w.Header(),response.Header)
 	w.WriteHeader(response.StatusCode)
 	s.streamBodyWithUsage(w,response.Body,&record,response.Header.Get("Content-Type"))
+	if selectedProvider!=nil && selectedUpstreamModel!="" {
+		if cost,known:=estimateRequestCost(selectedProvider.config,selectedUpstreamModel,record.PromptTokens,record.CompletionTokens);known {
+			record.CostUSD=cost
+			record.CostKnown=true
+		}
+	}
+	if comboStrategy=="smart" {
+		mergeSmartDecisionUsage(&record)
+	}
 	if response.StatusCode>=500 {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
 		s.logger.Warn("provider returned server error","provider",providerID,"model",input.Model,"status",response.StatusCode)

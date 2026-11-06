@@ -4,13 +4,15 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 type Page = "endpoint" | "providers" | "accounts" | "combos" | "usage" | "settings";
-type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string; key_count?:number };
-type Model = { id:string; owned_by?:string };
-type Route = { provider:string; upstream_model:string; fallback_models?:string[]; strategy?:"fallback"|"round-robin"; sticky_limit?:number };
+type ModelCapabilities = { vision?:boolean; pdf?:boolean; audio_input?:boolean; video_input?:boolean; image_output?:boolean; audio_output?:boolean; search?:boolean; tools?:boolean; reasoning?:boolean; context_window?:number; max_output?:number };
+type ModelPricing = { input_per_million_usd:number; output_per_million_usd:number };
+type Provider = { id:string; base_url:string; chat_path:string; models_url?:string; auth_type:string; models:string[]; timeout_seconds:number; has_api_key:boolean; api_key_preview?:string; key_count?:number; model_capabilities?:Record<string,ModelCapabilities>; model_pricing?:Record<string,ModelPricing> };
+type Model = { id:string; owned_by?:string; capabilities?:ModelCapabilities; context_window?:number; max_output?:number; pricing?:ModelPricing };
+type Route = { provider:string; upstream_model:string; fallback_models?:string[]; strategy?:"fallback"|"round-robin"|"smart"|"fusion"; sticky_limit?:number; smart_decision_provider?:string; smart_decision_model?:string; smart_policy?:"smart-switch"|"strict-lock"|"per-turn"; smart_confidence?:number; smart_timeout_seconds?:number; fusion_models?:string[]; judge_model?:string; fusion_min_panel?:number; fusion_timeout_seconds?:number };
 type Key = { id:string; name:string; prefix:string; enabled:boolean; created_at:string };
-type Log = { id:string; at:string; provider:string; model:string; status:number; latency_ms:number; streaming:boolean; prompt_tokens?:number; completion_tokens?:number; total_tokens?:number; upstream_attempts?:number; credential_retries?:number; fallback_attempts?:number; engine?:string; account?:string; ttft_ms?:number; endpoint?:string; source?:string };
-type Usage = { total_requests:number; successful_requests:number; failed_requests:number; avg_latency_ms:number; total_prompt_tokens?:number; total_completion_tokens?:number; total_tokens?:number; by_provider:Record<string,number>; by_model:Record<string,number> };
-type Snapshot = { service:string; version:string; status:string; default_provider:string; providers:Provider[]; routes:Record<string,Route>; settings:{token_saver:string;code_mode:string}; keys:Key[]; usage:Usage; requests:Log[] };
+type Log = { id:string; at:string; provider:string; model:string; status:number; latency_ms:number; streaming:boolean; prompt_tokens?:number; completion_tokens?:number; total_tokens?:number; upstream_attempts?:number; credential_retries?:number; fallback_attempts?:number; engine?:string; account?:string; ttft_ms?:number; endpoint?:string; source?:string; upstream_model?:string; cost_usd?:number; cost_known?:boolean; routing_strategy?:string };
+type Usage = { total_requests:number; successful_requests:number; failed_requests:number; avg_latency_ms:number; total_prompt_tokens?:number; total_completion_tokens?:number; total_tokens?:number; total_estimated_cost_usd?:number; priced_requests?:number; unpriced_requests?:number; cost_coverage_percent?:number; by_provider:Record<string,number>; by_model:Record<string,number> };
+type Snapshot = { service:string; version:string; status:string; default_provider:string; providers:Provider[]; routes:Record<string,Route>; settings:{token_saver:string;code_mode:string;capacity_adapters?:Record<string,string[]>}; keys:Key[]; usage:Usage; requests:Log[] };
 type Credential = {id:string;auth_index:string;name:string;type?:string;provider?:string;email?:string;account?:string;label?:string;status?:string;status_message?:string;disabled?:boolean;unavailable?:boolean;requires_sign_in?:boolean;renewal_state?:string;recovery_stage?:string;quota_blocked?:boolean;access_token_expires_at?:string;last_refresh?:string;next_retry_after?:string;quota?:{observed_at?:string;signals?:Record<string,string>};model_quotas?:Record<string,{observed_at?:string;signals?:Record<string,string>}>};
 const oauthProviders=[{id:"claude",label:"Claude"},{id:"codex",label:"Codex"},{id:"antigravity",label:"Antigravity"},{id:"kimi",label:"Kimi"},{id:"kimi-ai",label:"Kimi AI"},{id:"xai",label:"xAI"},{id:"devin",label:"Devin"},{id:"meta",label:"Meta"}];
 
@@ -70,9 +72,18 @@ export default function Home(){
  const [routeProvider,setRouteProvider]=useState("");
  const [upstreamModel,setUpstreamModel]=useState("");
  const [fallbackModels,setFallbackModels]=useState("");
- const [routeStrategy,setRouteStrategy]=useState<"fallback"|"round-robin">("fallback");
+ const [routeStrategy,setRouteStrategy]=useState<"fallback"|"round-robin"|"smart"|"fusion">("fallback");
  const [stickyLimit,setStickyLimit]=useState("1");
- const [providerForm,setProviderForm]=useState({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100"});
+ const [smartDecisionProvider,setSmartDecisionProvider]=useState("");
+ const [smartDecisionModel,setSmartDecisionModel]=useState("");
+ const [smartPolicy,setSmartPolicy]=useState<"smart-switch"|"strict-lock"|"per-turn">("smart-switch");
+ const [smartConfidence,setSmartConfidence]=useState("0.8");
+ const [smartTimeout,setSmartTimeout]=useState("8");
+ const [fusionModels,setFusionModels]=useState("");
+ const [judgeModel,setJudgeModel]=useState("");
+ const [fusionMinPanel,setFusionMinPanel]=useState("2");
+ const [fusionTimeout,setFusionTimeout]=useState("45");
+ const [providerForm,setProviderForm]=useState({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100",model_capabilities:"{}",model_pricing:"{}"});
  const [settings,setSettings]=useState({default_provider:"nvidia",token_saver:"safe",code_mode:"off"});
 
  const request=useCallback(async(path:string,init:RequestInit={})=>{
@@ -100,12 +111,42 @@ export default function Home(){
  useEffect(()=>{if(apiKey&& !authenticated && !booting && sessionStorage.getItem("fantom-admin-key")===apiKey){void load();}},[apiKey,authenticated,booting,load]);
 
  async function action(fn:()=>Promise<unknown>,success:string){setBusy(true);setError("");setNotice("");try{const result=await fn() as {core_sync_ok?:boolean;core_sync_error?:string}|undefined;setNotice(result?.core_sync_ok===false?success+" · Provider saved, but protocol-runtime sync failed: "+(result.core_sync_error||"unknown error"):success);await load();}catch(e){setError(e instanceof Error?e.message:"Operation failed");}finally{setBusy(false);}}
- function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100"});setShowProviderForm(true);}
- function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_keys:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100)});setShowProviderForm(true);}
- async function saveProvider(e:FormEvent){e.preventDefault();const body={...providerForm,api_keys:providerForm.api_keys.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean),models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");}
+ function resetProvider(){setEditingProvider(null);setProviderForm({id:"",base_url:"",chat_path:"/chat/completions",models_url:"",auth_type:"bearer",api_keys:"",models:"*",timeout_seconds:"100",model_capabilities:"{}",model_pricing:"{}"});setShowProviderForm(true);}
+ function editProvider(p:Provider){setEditingProvider(p);setProviderForm({id:p.id,base_url:p.base_url,chat_path:p.chat_path||"/chat/completions",models_url:p.models_url||"",auth_type:p.auth_type,api_keys:"",models:(p.models||[]).join(", "),timeout_seconds:String(p.timeout_seconds||100),model_capabilities:JSON.stringify(p.model_capabilities||{},null,2),model_pricing:JSON.stringify(p.model_pricing||{},null,2)});setShowProviderForm(true);}
+ async function saveProvider(e:FormEvent){
+  e.preventDefault();
+  let model_capabilities:Record<string,ModelCapabilities>={},model_pricing:Record<string,ModelPricing>={};
+  try{model_capabilities=JSON.parse(providerForm.model_capabilities||"{}");model_pricing=JSON.parse(providerForm.model_pricing||"{}");if(!model_capabilities||Array.isArray(model_capabilities)||typeof model_capabilities!=="object"||!model_pricing||Array.isArray(model_pricing)||typeof model_pricing!=="object")throw new Error("Metadata must be a JSON object.");}
+  catch(error){setError("Invalid model metadata JSON: "+(error instanceof Error?error.message:"invalid JSON"));return;}
+  const body={...providerForm,model_capabilities,model_pricing,api_keys:providerForm.api_keys.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean),models:providerForm.models.split(",").map(x=>x.trim()).filter(Boolean),timeout_seconds:Number(providerForm.timeout_seconds)};
+  await action(async()=>{await request(editingProvider?"/api/admin/providers/"+encodeURIComponent(editingProvider.id):"/api/admin/providers",{method:editingProvider?"PUT":"POST",body:JSON.stringify(body)});setShowProviderForm(false);setEditingProvider(null);},"Provider saved and runtime reloaded");
+}
  async function testProvider(id:string){setBusy(true);setError("");try{const data=await request("/api/admin/providers/"+encodeURIComponent(id)+"/test",{method:"POST",body:"{}"});setNotice(data.ok?"Chat test passed · "+data.test_model+" · "+data.latency_ms+" ms":"Chat test failed · "+(data.error||data.message)+" · HTTP "+(data.chat_status||data.http_status||"—"));}catch(e){setError(e instanceof Error?e.message:"Connection test failed");}finally{setBusy(false);}}
  async function refreshModelCatalog(){setBusy(true);setError("");try{await request("/api/admin/models/refresh",{method:"POST"});await load();}catch(e){setError(e instanceof Error?e.message:"Could not refresh model catalog");}finally{setBusy(false);}}
- async function saveRoute(e:React.FormEvent){e.preventDefault();const next={...(snapshot?.routes||{}),[alias]:{provider:routeProvider,upstream_model:upstreamModel,fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),strategy:routeStrategy,sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0}};await action(async()=>{await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});setAlias("");setUpstreamModel("");setFallbackModels("");setRouteStrategy("fallback");setStickyLimit("1");},"Combo saved");}
+ async function saveRoute(e:React.FormEvent){
+  e.preventDefault();
+  const next={...(snapshot?.routes||{}),[alias]:{
+   provider:routeProvider,upstream_model:upstreamModel,
+   fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),
+   strategy:routeStrategy,
+   sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0,
+   smart_decision_provider:routeStrategy==="smart"?(smartDecisionProvider||snapshot?.providers?.[0]?.id||""):"",
+   smart_decision_model:routeStrategy==="smart"?smartDecisionModel:"",
+   smart_policy:routeStrategy==="smart"?smartPolicy:"",
+   smart_confidence:routeStrategy==="smart"?Math.min(.95,Math.max(.5,Number(smartConfidence)||.8)):0,
+   smart_timeout_seconds:routeStrategy==="smart"?Math.min(30,Math.max(1,Number(smartTimeout)||8)):0,
+   fusion_models:routeStrategy==="fusion"?fusionModels.split(/\r?\n|,/).map(x=>x.trim()).filter(Boolean):[],
+   judge_model:routeStrategy==="fusion"?judgeModel:"",
+   fusion_min_panel:routeStrategy==="fusion"?Math.max(2,Number(fusionMinPanel)||2):0,
+   fusion_timeout_seconds:routeStrategy==="fusion"?Math.min(180,Math.max(5,Number(fusionTimeout)||45)):0
+  }};
+  await action(async()=>{
+   await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});
+   setAlias("");setUpstreamModel("");setFallbackModels("");setRouteStrategy("fallback");setStickyLimit("1");
+   setSmartDecisionProvider("");setSmartDecisionModel("");setSmartPolicy("smart-switch");setSmartConfidence("0.8");setSmartTimeout("8");
+   setFusionModels("");setJudgeModel("");setFusionMinPanel("2");setFusionTimeout("45");
+  },"Combo saved");
+ }
  async function removeRoute(name:string){const next={...(snapshot?.routes||{})};delete next[name];await action(()=>request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})}),"Route removed");}
  async function createKey(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");try{const data=await request("/api/admin/keys",{method:"POST",body:JSON.stringify({name:keyName})});setNewKey(data.key);setNotice("API key created. Copy it now; it will not be shown again.");await load();}catch(e){setError(e instanceof Error?e.message:"Could not create key");}finally{setBusy(false);}}
  async function saveSettings(e:React.FormEvent){e.preventDefault();await action(()=>request("/api/admin/settings",{method:"PUT",body:JSON.stringify(settings)}),"Gateway settings saved");}
@@ -131,17 +172,54 @@ export default function Home(){
     {page==="endpoint"&&<EndpointPage snapshot={snapshot} newKey={newKey} setNewKey={setNewKey} keyName={keyName} setKeyName={setKeyName} busy={busy} onCreateKey={createKey} onRevokeKey={id=>void action(()=>request("/api/admin/keys/"+id,{method:"DELETE"}),"API key revoked")}/>}
     {page==="providers"&&<Providers providers={snapshot?.providers||[]} models={models} onRefresh={()=>void refreshModelCatalog()} onAdd={resetProvider} onEdit={editProvider} onTest={testProvider} onDelete={id=>void action(()=>request("/api/admin/providers/"+encodeURIComponent(id),{method:"DELETE"}),"Provider deleted")}/>}
     {page==="accounts"&&<AccountsPage request={request}/>}
-    {page==="combos"&&<Routing routes={snapshot?.routes||{}} providers={snapshot?.providers||[]} alias={alias} setAlias={setAlias} routeProvider={routeProvider||snapshot?.providers?.[0]?.id||""} setRouteProvider={setRouteProvider} upstreamModel={upstreamModel} setUpstreamModel={setUpstreamModel} fallbackModels={fallbackModels} setFallbackModels={setFallbackModels} routeStrategy={routeStrategy} setRouteStrategy={setRouteStrategy} stickyLimit={stickyLimit} setStickyLimit={setStickyLimit} onSave={saveRoute} onRemove={removeRoute}/>}
+    {page==="combos"&&<Routing routes={snapshot?.routes||{}} providers={snapshot?.providers||[]} alias={alias} setAlias={setAlias} routeProvider={routeProvider||snapshot?.providers?.[0]?.id||""} setRouteProvider={setRouteProvider} upstreamModel={upstreamModel} setUpstreamModel={setUpstreamModel} fallbackModels={fallbackModels} setFallbackModels={setFallbackModels} routeStrategy={routeStrategy} setRouteStrategy={setRouteStrategy} stickyLimit={stickyLimit} setStickyLimit={setStickyLimit} smartDecisionProvider={smartDecisionProvider||snapshot?.providers?.[0]?.id||""} setSmartDecisionProvider={setSmartDecisionProvider} smartDecisionModel={smartDecisionModel} setSmartDecisionModel={setSmartDecisionModel} smartPolicy={smartPolicy} setSmartPolicy={setSmartPolicy} smartConfidence={smartConfidence} setSmartConfidence={setSmartConfidence} smartTimeout={smartTimeout} setSmartTimeout={setSmartTimeout} fusionModels={fusionModels} setFusionModels={setFusionModels} judgeModel={judgeModel} setJudgeModel={setJudgeModel} fusionMinPanel={fusionMinPanel} setFusionMinPanel={setFusionMinPanel} fusionTimeout={fusionTimeout} setFusionTimeout={setFusionTimeout} onSave={saveRoute} onRemove={removeRoute}/>}
     {page==="usage"&&<UsagePage usage={usage} requests={snapshot?.requests||[]}/>}
-    {page==="settings"&&<><form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form><CoreRoutingSettings request={request}/></>}
+    {page==="settings"&&<><form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form><CoreRoutingSettings request={request}/><CapacityAdapterSettings request={request}/></>}
    </div>
    <footer className="app-footer"><span>FANTOM CONTROL PLANE <b>0.2</b></span><span>ONE ENDPOINT. TOTAL CONTROL.</span></footer>
   </main>
-  {showProviderForm&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowProviderForm(false);}}><form className="modal" onSubmit={saveProvider}><div className="modal-head"><div><div className="eyebrow">PROVIDER CONFIGURATION</div><h2>{editingProvider?"Edit provider":"Connect a provider"}</h2></div><button type="button" className="icon-button" onClick={()=>setShowProviderForm(false)}>×</button></div><div className="form-grid"><div><label>PROVIDER ID</label><input required disabled={!!editingProvider} value={providerForm.id} onChange={e=>setProviderForm({...providerForm,id:e.target.value})} placeholder="e.g. openrouter"/></div><div><label>AUTHENTICATION</label><select value={providerForm.auth_type} onChange={e=>setProviderForm({...providerForm,auth_type:e.target.value})}><option value="bearer">Bearer API key</option><option value="none">No authentication</option></select></div><div className="span-2"><label>BASE URL</label><input required value={providerForm.base_url} onChange={e=>setProviderForm({...providerForm,base_url:e.target.value})} placeholder="https://api.provider.com/v1"/></div><details className="provider-advanced span-2"><summary>Advanced settings</summary><div className="advanced-fields"><div><label>CHAT COMPLETIONS PATH</label><input value={providerForm.chat_path} onChange={e=>setProviderForm({...providerForm,chat_path:e.target.value})}/></div><div><label>MODELS ENDPOINT (OPTIONAL)</label><input value={providerForm.models_url} onChange={e=>setProviderForm({...providerForm,models_url:e.target.value})} placeholder="https://…/models"/></div></div></details><div className="span-2"><label>API KEY POOL {editingProvider&&"(leave blank to keep current keys)"}</label><textarea required={!editingProvider&&providerForm.auth_type==="bearer"} rows={3} autoComplete="off" value={providerForm.api_keys} onChange={e=>setProviderForm({...providerForm,api_keys:e.target.value})} placeholder={editingProvider?"Add replacement keys, one per line or comma-separated":"Paste one or more API keys, one per line"}/><small>Keys rotate across healthy credentials. Rejected or rate-limited keys are temporarily skipped; when the entire pool is cooling down, Fantom waits for its Retry-After window. Existing keys are never shown again.</small></div><details className="provider-advanced span-2"><summary>Model access & timeout</summary><div className="advanced-fields"><div><label>MODEL ALLOWLIST</label><input value={providerForm.models} onChange={e=>setProviderForm({...providerForm,models:e.target.value})} placeholder="* or model-a, model-b"/><small>Use * to expose every model returned by the provider catalog.</small></div><div><label>TIMEOUT (SECONDS)</label><input type="number" min="1" max="600" value={providerForm.timeout_seconds} onChange={e=>setProviderForm({...providerForm,timeout_seconds:e.target.value})}/></div></div></details></div><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setShowProviderForm(false)}>Cancel</button><button className="primary" disabled={busy}>{busy?"SAVING…":"Save provider"}</button></div></form></div>}
+  {showProviderForm&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowProviderForm(false);}}><form className="modal" onSubmit={saveProvider}><div className="modal-head"><div><div className="eyebrow">PROVIDER CONFIGURATION</div><h2>{editingProvider?"Edit provider":"Connect a provider"}</h2></div><button type="button" className="icon-button" onClick={()=>setShowProviderForm(false)}>×</button></div><div className="form-grid"><div><label>PROVIDER ID</label><input required disabled={!!editingProvider} value={providerForm.id} onChange={e=>setProviderForm({...providerForm,id:e.target.value})} placeholder="e.g. openrouter"/></div><div><label>AUTHENTICATION</label><select value={providerForm.auth_type} onChange={e=>setProviderForm({...providerForm,auth_type:e.target.value})}><option value="bearer">Bearer API key</option><option value="none">No authentication</option></select></div><div className="span-2"><label>BASE URL</label><input required value={providerForm.base_url} onChange={e=>setProviderForm({...providerForm,base_url:e.target.value})} placeholder="https://api.provider.com/v1"/></div><details className="provider-advanced span-2"><summary>Advanced settings</summary><div className="advanced-fields"><div><label>CHAT COMPLETIONS PATH</label><input value={providerForm.chat_path} onChange={e=>setProviderForm({...providerForm,chat_path:e.target.value})}/></div><div><label>MODELS ENDPOINT (OPTIONAL)</label><input value={providerForm.models_url} onChange={e=>setProviderForm({...providerForm,models_url:e.target.value})} placeholder="https://…/models"/></div></div></details><div className="span-2"><label>API KEY POOL {editingProvider&&"(leave blank to keep current keys)"}</label><textarea required={!editingProvider&&providerForm.auth_type==="bearer"} rows={3} autoComplete="off" value={providerForm.api_keys} onChange={e=>setProviderForm({...providerForm,api_keys:e.target.value})} placeholder={editingProvider?"Add replacement keys, one per line or comma-separated":"Paste one or more API keys, one per line"}/><small>Keys rotate across healthy credentials. Rejected or rate-limited keys are temporarily skipped; when the entire pool is cooling down, Fantom waits for its Retry-After window. Existing keys are never shown again.</small></div><details className="provider-advanced span-2"><summary>Model access & timeout</summary><div className="advanced-fields"><div><label>MODEL ALLOWLIST</label><input value={providerForm.models} onChange={e=>setProviderForm({...providerForm,models:e.target.value})} placeholder="* or model-a, model-b"/><small>Use * to expose every model returned by the provider catalog.</small></div><div><label>TIMEOUT (SECONDS)</label><input type="number" min="1" max="600" value={providerForm.timeout_seconds} onChange={e=>setProviderForm({...providerForm,timeout_seconds:e.target.value})}/></div></div></details><details className="provider-advanced span-2"><summary>Per-model capabilities & pricing (optional)</summary><div className="advanced-fields"><div><label>MODEL CAPABILITIES JSON</label><textarea rows={7} spellCheck={false} value={providerForm.model_capabilities} onChange={e=>setProviderForm({...providerForm,model_capabilities:e.target.value})}/><small>Example: {"{ \"model-id\": {\"vision\":true,\"pdf\":true,\"tools\":true,\"context_window\":200000,\"max_output\":16000} }"}</small></div><div><label>MODEL PRICING JSON · USD PER 1M TOKENS</label><textarea rows={7} spellCheck={false} value={providerForm.model_pricing} onChange={e=>setProviderForm({...providerForm,model_pricing:e.target.value})}/><small>Example: {"{ \"model-id\": {\"input_per_million_usd\":1,\"output_per_million_usd\":4} }"}. Estimates only use prices explicitly configured here.</small></div></div></details></div><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setShowProviderForm(false)}>Cancel</button><button className="primary" disabled={busy}>{busy?"SAVING…":"Save provider"}</button></div></form></div>}
   <div className="mobile-nav">{nav.map(n=><button key={n.id} className={page===n.id?"active":""} onClick={()=>setPage(n.id)}><Icon name={n.glyph} size={18}/><span>{n.label}</span></button>)}<button className={page==="settings"?"active":""} onClick={()=>setPage("settings")}><Icon name="settings" size={18}/><span>Settings</span></button></div>
  </div>;
 }
 
+
+function quotaMetrics(quota?:{observed_at?:string;signals?:Record<string,string>}){
+ const entries=Object.entries(quota?.signals||{});
+ const find=(pattern:RegExp)=>entries.find(([key])=>pattern.test(key.toLowerCase()));
+ const numeric=(entry?:[string,string])=>{
+  if(!entry)return null;
+  const value=String(entry[1]).replace(/,/g,"").replace(/%/g,"").trim();
+  const number=Number(value);
+  return Number.isFinite(number)?number:null;
+ };
+ const percentEntry=find(/(used|usage|consumed).*percent|percent.*(used|usage|consumed)/);
+ const remainingEntry=find(/remaining.*percent|percent.*remaining/);
+ const usedEntry=find(/^(used|usage|consumed|requests_used|tokens_used)$/);
+ const totalEntry=find(/^(limit|total|quota|requests_limit|tokens_limit)$/);
+ let percent=numeric(percentEntry);
+ if(percent===null&&remainingEntry){const remaining=numeric(remainingEntry);if(remaining!==null)percent=100-remaining;}
+ const used=numeric(usedEntry),total=numeric(totalEntry);
+ if(percent===null&&used!==null&&total!==null&&total>0)percent=used/total*100;
+ const resetEntry=find(/reset|renew|refill|refresh_at|resets_at/);
+ return {percent:percent===null?null:Math.min(100,Math.max(0,percent)),used,total,reset:resetEntry?.[1]||""};
+}
+function QuotaCell({account}:{account:Credential}){
+ const quota=quotaMetrics(account.quota);
+ const models=Object.entries(account.model_quotas||{}).slice(0,4).map(([name,data])=>({name,metrics:quotaMetrics(data)}));
+ const hasSignals=Object.keys(account.quota?.signals||{}).length>0;
+ return <div className="quota-cell">
+  {account.quota_blocked&&<b className="warning-text">Quota exhausted</b>}
+  {quota.percent!==null&&<div className="quota-meter"><div><small>Account usage</small><b>{quota.percent.toFixed(1)}%</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:quota.percent+"%"}}/></div></div>}
+  {quota.used!==null&&quota.total!==null&&<small>{formatNumber(quota.used)} / {formatNumber(quota.total)} used</small>}
+  {quota.reset&&<small>Reset / renewal: {quota.reset}</small>}
+  {account.quota?.observed_at&&<small>Observed {ago(account.quota.observed_at)}</small>}
+  {account.access_token_expires_at&&<small>Token expires {new Date(account.access_token_expires_at).toLocaleString()}</small>}
+  {models.length>0&&<details><summary>Per-model quota ({Object.keys(account.model_quotas||{}).length})</summary>{models.map(model=><div className="quota-model" key={model.name}><span>{model.name}</span><b>{model.metrics.percent===null?"—":model.metrics.percent.toFixed(1)+"%"}</b>{model.metrics.percent!==null&&<div className="bar-track"><i className="bar-fill tone-1" style={{width:model.metrics.percent+"%"}}/></div>}{model.metrics.reset&&<small>Reset: {model.metrics.reset}</small>}</div>)}</details>}
+  {!hasSignals&&!account.access_token_expires_at&&!account.quota_blocked&&models.length===0&&<small>No quota signal reported by provider</small>}
+  <details><summary>Raw quota signals</summary><pre>{JSON.stringify({quota:account.quota||{},models:account.model_quotas||{}},null,2)}</pre></details>
+ </div>;
+}
 
 function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
  const [accounts,setAccounts]=useState<Credential[]>([]);
@@ -179,7 +257,7 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
     {filtered.map(account=>{const active=!account.disabled&&!account.unavailable;const health=account.disabled?"Disabled":account.requires_sign_in?"Sign in required":account.quota_blocked?"Quota blocked":account.unavailable?"Cooling down":active?"Ready":(account.status||"Unavailable");const tone=active?"green":account.requires_sign_in||account.quota_blocked?"amber":"red";const key=account.auth_index||account.id;return <tr key={key}>
      <td><b>{account.email||account.account||account.label||account.name||account.id}</b><small className="account-subline">{account.name} · #{account.auth_index}</small></td><td><span className="mono">{account.provider||account.type||"—"}</span></td>
      <td><span className={cls("tag",tone)}>{health}</span>{account.renewal_state&&<small className="account-subline">{account.renewal_state}</small>}</td>
-     <td><div className="quota-cell">{account.quota_blocked?<b className="warning-text">Quota exhausted</b>:null}{account.quota?.observed_at?<small>Observed {ago(account.quota.observed_at)}</small>:null}{account.access_token_expires_at?<small>Token expires {new Date(account.access_token_expires_at).toLocaleString()}</small>:null}{!account.quota?.observed_at&&!account.access_token_expires_at&&!account.quota_blocked?<small>No quota signal reported</small>:null}<details><summary>Quota details</summary><pre>{JSON.stringify({quota:account.quota||{},models:account.model_quotas||{}},null,2)}</pre></details></div></td>
+     <td><QuotaCell account={account}/></td>
      <td>{account.last_refresh?ago(account.last_refresh):"—"}</td>
      <td><div className="account-actions">
       <button className="ghost" title="Refresh OAuth token" disabled={!!busy} onClick={()=>void runAction("refresh:"+key,()=>request("/v8/management/credentials/refresh",{method:"POST",body:JSON.stringify({name:account.name,auth_index:account.auth_index})}),"Credential refresh requested.")}><Icon name="refresh" size={13}/></button>
@@ -194,6 +272,73 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
  </div>;
 }
 
+
+function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
+ const blank=()=>({enabled:false,roundRobin:false,models:""});
+ const [draft,setDraft]=useState({vision:blank(),pdf:blank(),audio_input:blank(),video_input:blank()});
+ const [loading,setLoading]=useState(false);
+ const [saving,setSaving]=useState(false);
+ const [error,setError]=useState("");
+ const [notice,setNotice]=useState("");
+ const load=useCallback(async()=>{
+  setLoading(true);setError("");
+  try{
+   const data=await request("/api/admin/capacity-adapters");
+   const adapters=data.adapters||{};
+   const normalize=(value:any)=>{
+    if(Array.isArray(value))return {enabled:value.length>0,roundRobin:false,models:value.join("\n")};
+    return {enabled:value?.enabled===true,roundRobin:value?.roundRobin===true,models:Array.isArray(value?.models)?value.models.join("\n"):""};
+   };
+   setDraft({
+    vision:normalize(adapters.vision),
+    pdf:normalize(adapters.pdf),
+    audio_input:normalize(adapters.audio_input),
+    video_input:normalize(adapters.video_input)
+   });
+  }catch(e){setError(e instanceof Error?e.message:"Could not load capacity adapter pools");}
+  finally{setLoading(false);}
+ },[request]);
+ useEffect(()=>{void load();},[load]);
+ async function save(e:FormEvent){
+  e.preventDefault();setSaving(true);setError("");setNotice("");
+  const adapters=Object.fromEntries(Object.entries(draft).map(([key,value])=>[
+   key,{
+    enabled:value.enabled,
+    roundRobin:value.roundRobin,
+    models:value.models.split(/\r?\n|,/).map(model=>model.trim()).filter(Boolean)
+   }
+  ]));
+  try{
+   const result=await request("/api/admin/capacity-adapters",{method:"PUT",body:JSON.stringify({adapters})});
+   setNotice("Capacity adapter policies saved.");
+   const normalize=(value:any)=>({enabled:value?.enabled===true,roundRobin:value?.roundRobin===true,models:Array.isArray(value?.models)?value.models.join("\n"):""});
+   setDraft({
+    vision:normalize(result.adapters?.vision),pdf:normalize(result.adapters?.pdf),
+    audio_input:normalize(result.adapters?.audio_input),video_input:normalize(result.adapters?.video_input)
+   });
+  }catch(e){setError(e instanceof Error?e.message:"Could not save capacity adapter pools");}
+  finally{setSaving(false);}
+ }
+ const update=(key:"vision"|"pdf"|"audio_input"|"video_input",patch:Partial<{enabled:boolean;roundRobin:boolean;models:string}>)=>setDraft(prev=>({...prev,[key]:{...prev[key],...patch}}));
+ const pool=(key:"vision"|"pdf"|"audio_input"|"video_input",title:string,description:string)=><section className="panel settings-panel" key={key}>
+  <div className="panel-title"><div className="icon-tile violet"><Icon name="layers"/></div><div><b>{title}</b><span>{description}</span></div></div>
+  <div className="setting-toggle"><div><b>Enable adapter</b><span>Use this pool only when the current candidate list has no model supporting this input type.</span></div><input type="checkbox" checked={draft[key].enabled} onChange={e=>update(key,{enabled:e.target.checked})}/></div>
+  <div className="setting-toggle"><div><b>Round robin within pool</b><span>Rotate adapter models between requests. Disabled means preserve the listed priority order.</span></div><input type="checkbox" checked={draft[key].roundRobin} disabled={!draft[key].enabled} onChange={e=>update(key,{roundRobin:e.target.checked})}/></div>
+  <label>MODEL IDS</label>
+  <textarea rows={3} value={draft[key].models} disabled={!draft[key].enabled} onChange={e=>update(key,{models:e.target.value})} placeholder={"provider/model or combo-alias, one per line"}/>
+ </section>;
+ return <form onSubmit={save} className="core-routing-settings">
+  <div className="page-heading compact"><div><div className="eyebrow">CAPABILITY-AWARE ROUTING</div><h2>Capacity adapter pools</h2><p>Independent enablement and routing policy per modality. Adapters are considered only if no original candidate supports all required hard modalities.</p></div><button type="button" className="secondary" onClick={()=>void load()} disabled={loading||saving}><Icon name="refresh" size={14}/> Refresh</button></div>
+  {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button type="button" onClick={()=>{setError("");setNotice("");}}>×</button></div>}
+  <div className="core-routing-grid">
+   {pool("vision","Vision","Image inputs such as PNG, JPG, WebP and screenshots.")}
+   {pool("pdf","PDF / Documents","PDF and document inputs where supported by the selected upstream.")}
+   {pool("audio_input","Audio input","Incoming audio and transcription-capable models.")}
+   {pool("video_input","Video input","Video or frame-sequence capable models.")}
+  </div>
+  <div className="settings-save"><span>Max 16 unique model IDs per pool. Legacy array settings are migrated automatically.</span><button className="primary" disabled={saving||loading}>{saving?"SAVING…":"Save capacity pools"} <Icon name="check" size={15}/></button></div>
+ </form>;
+}
 
 function CoreRoutingSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
  const [strategy,setStrategy]=useState("weighted-round-robin");
@@ -312,15 +457,161 @@ function ModelCatalog({models,providers,onRefresh}:{models:Model[];providers:Pro
     {providers.map(provider=><option key={provider.id} value={provider.id}>{provider.id}</option>)}
    </select>
   </div>
-  <div className="table-scroll"><table><thead><tr><th>MODEL ID</th><th>PROVIDER</th><th>CLIENT MODEL NAME</th></tr></thead>
-   <tbody>{filtered.map(model=><tr key={model.id}><td><code className="model-code">{model.id}</code></td><td>{model.owned_by||"—"}</td><td><code>{model.id}</code></td></tr>)}</tbody>
+  <div className="table-scroll"><table><thead><tr><th>MODEL ID</th><th>PROVIDER</th><th>CAPABILITIES</th><th>CONTEXT / OUTPUT</th><th>INPUT / OUTPUT · USD / 1M</th><th>CLIENT MODEL NAME</th></tr></thead>
+   <tbody>{filtered.map(model=>{const caps=Object.entries(model.capabilities||{}).filter(([key,value])=>value===true&&key!=="tools");const context=model.context_window||model.capabilities?.context_window;const output=model.max_output||model.capabilities?.max_output;return <tr key={model.id}><td><code className="model-code">{model.id}</code></td><td>{model.owned_by||"—"}</td><td>{caps.length?caps.map(([key])=><span className="stream-tag" key={key}>{key.replaceAll("_"," ")}</span>):"—"}{model.capabilities?.tools&&<span className="stream-tag">tools</span>}</td><td>{context?formatNumber(context):"—"} / {output?formatNumber(output):"—"}</td><td>{model.pricing?model.pricing.input_per_million_usd+" / "+model.pricing.output_per_million_usd:"—"}</td><td><code>{model.id}</code></td></tr>})}</tbody>
   </table>{filtered.length===0&&<div className="empty">{models.length===0?"No models are currently exposed. Test a provider and refresh the catalog.":"No models match this filter."}</div>}</div>
  </section>;
 }
 function Providers({providers,models,onRefresh,onAdd,onEdit,onTest,onDelete}:{providers:Provider[];models:Model[];onRefresh:()=>void;onAdd:()=>void;onEdit:(p:Provider)=>void;onTest:(id:string)=>void;onDelete:(id:string)=>void}){return <><div className="provider-cards">{providers.map((p,i)=>{const providerModels=models.filter(m=>m.owned_by===p.id);return <article className="provider-large" key={p.id}><div className="provider-card-head"><div className={"provider-logo big tone-"+(i%4)}>{p.id.slice(0,2).toUpperCase()}</div><span className={cls("tag",p.has_api_key?"green":"amber")}>{p.has_api_key?"CONNECTED":"NEEDS CREDENTIAL"}</span></div><h3>{p.id}</h3><p className="provider-url">{p.base_url}</p><div className="provider-stats"><div><small>MODELS</small><b>{providerModels.length|| (p.models?.includes("*")?"Auto":"—")}</b></div><div><small>TIMEOUT</small><b>{p.timeout_seconds}s</b></div><div><small>KEYS</small><b>{p.key_count||0}</b></div></div><div className="provider-key-line"><Icon name="key" size={14}/><span>{p.api_key_preview||"No credential configured"}{p.key_count?` · ${p.key_count} rotating keys`:""}</span></div>{providerModels.length>0&&<details className="provider-models"><summary>Available models <span>{providerModels.length}</span></summary><div>{providerModels.slice(0,12).map(m=><code key={m.id}>{m.id}</code>)}{providerModels.length>12&&<small>+ {providerModels.length-12} more</small>}</div></details>}<div className="provider-actions"><button className="secondary" onClick={()=>onTest(p.id)}><Icon name="zap" size={14}/> Test</button><button className="secondary" onClick={()=>onEdit(p)}>Configure</button><button className="icon-button" title="Delete provider" onClick={()=>onDelete(p.id)}><Icon name="trash" size={15}/></button></div></article>})}</div><button className="add-provider-card" onClick={onAdd}><span className="add-circle"><Icon name="plus" size={20}/></span><b>Add provider</b><span>Connect another OpenAI-compatible endpoint</span></button><details className="inline-tool-details"><summary>Browse searchable model catalog <span>{models.length} models</span></summary><ModelCatalog models={models} providers={providers} onRefresh={onRefresh}/></details></>}
-function Routing({routes,providers,alias,setAlias,routeProvider,setRouteProvider,upstreamModel,setUpstreamModel,fallbackModels,setFallbackModels,routeStrategy,setRouteStrategy,stickyLimit,setStickyLimit,onSave,onRemove}:{routes:Record<string,Route>;providers:Provider[];alias:string;setAlias:(v:string)=>void;routeProvider:string;setRouteProvider:(v:string)=>void;upstreamModel:string;setUpstreamModel:(v:string)=>void;fallbackModels:string;setFallbackModels:(v:string)=>void;routeStrategy:"fallback"|"round-robin";setRouteStrategy:(v:"fallback"|"round-robin")=>void;stickyLimit:string;setStickyLimit:(v:string)=>void;onSave:(e:FormEvent)=>void;onRemove:(n:string)=>void}){return <div className="routing-layout"><section className="panel route-create"><div className="panel-heading"><div><div className="eyebrow">ROUTING COMBO</div><h3>Create a combo</h3></div><div className="icon-tile violet"><Icon name="route"/></div></div><p className="muted-copy">Expose a stable model name to your clients and map it to the actual model and provider upstream.</p><form onSubmit={onSave}><label>COMBO NAME</label><input required value={alias} onChange={e=>setAlias(e.target.value)} placeholder="e.g. fantom-fast"/><label>UPSTREAM PROVIDER</label><select required value={routeProvider} onChange={e=>setRouteProvider(e.target.value)}>{providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select><label>UPSTREAM MODEL ID</label><input required value={upstreamModel} onChange={e=>setUpstreamModel(e.target.value)} placeholder="e.g. meta/llama-3.3-70b-instruct"/><label>COMBO STRATEGY</label><select value={routeStrategy} onChange={e=>setRouteStrategy(e.target.value as "fallback"|"round-robin")}><option value="fallback">Sequential fallback</option><option value="round-robin">Round robin + failover</option></select><label>STICKY LIMIT</label><input type="number" min="1" max="10000" value={stickyLimit} onChange={e=>setStickyLimit(e.target.value)} disabled={routeStrategy!=="round-robin"}/><small>Keep each selected model for this many requests before rotating. If that model fails, the remaining candidates are still tried.</small><details className="combo-advanced"><summary>Add fallback models (optional)</summary><label>FALLBACK MODEL ALIASES</label><input value={fallbackModels} onChange={e=>setFallbackModels(e.target.value)} placeholder="backup-fast, backup-stable"/><small>Try these public model IDs or aliases in order when the primary route hits an auth, rate-limit or temporary upstream error.</small></details><button className="primary wide" disabled={!providers.length}><Icon name="plus" size={15}/> Create combo</button></form></section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">ACTIVE COMBOS</div><h3>Your combos</h3></div><span className="tag">{Object.keys(routes).length} ROUTES</span></div><div className="route-list">{Object.entries(routes).map(([name,route])=><div className="route-row" key={name}><div className="route-source"><code>{name}</code><small>PUBLIC MODEL</small></div><div className="route-arrow"><Icon name="route" size={17}/></div><div className="route-target"><b>{route.upstream_model}</b><small>{route.provider} · {(route.strategy||"fallback")==="round-robin"?"ROUND ROBIN · STICKY "+(route.sticky_limit||1):"FALLBACK"}</small>{route.fallback_models&&route.fallback_models.length>0&&<small className="fallback-hint">chain: {route.fallback_models.join(" → ")}</small>}</div><button className="icon-button" onClick={()=>onRemove(name)} title="Remove route"><Icon name="trash" size={14}/></button></div>)}{Object.keys(routes).length===0&&<div className="empty">No combos yet. Create one to give your client a stable model name with automatic fallbacks.</div>}</div></section></div>}
-function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){const max=Math.max(1,...Object.values(usage.by_model||{}));return <><div className="metrics-grid three"><Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/><Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/><Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/></div><div className="metrics-grid three usage-token-metrics"><Metric label="PROMPT TOKENS" value={formatNumber(usage.total_prompt_tokens||0)} detail="Reported by providers" glyph="terminal" tone="blue"/><Metric label="COMPLETION TOKENS" value={formatNumber(usage.total_completion_tokens||0)} detail="Reported by providers" glyph="terminal" tone="violet"/><Metric label="TOTAL TOKENS" value={formatNumber(usage.total_tokens||0)} detail="No estimates included" glyph="chart" tone="green"/></div><div className="content-grid"><section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>{Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}{Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}</section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div><div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div><p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p><div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div><div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div></section></div><section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section><details className="inline-tool-details request-explorer"><summary>Open full request explorer <span>{requests.length} retained requests</span></summary><LogsPage requests={requests}/></details></>}
-
+function Routing({
+ routes,providers,alias,setAlias,routeProvider,setRouteProvider,upstreamModel,setUpstreamModel,
+ fallbackModels,setFallbackModels,routeStrategy,setRouteStrategy,stickyLimit,setStickyLimit,
+ smartDecisionProvider,setSmartDecisionProvider,smartDecisionModel,setSmartDecisionModel,
+ smartPolicy,setSmartPolicy,smartConfidence,setSmartConfidence,smartTimeout,setSmartTimeout,
+ fusionModels,setFusionModels,judgeModel,setJudgeModel,fusionMinPanel,setFusionMinPanel,
+ fusionTimeout,setFusionTimeout,onSave,onRemove
+}:{
+ routes:Record<string,Route>;providers:Provider[];alias:string;setAlias:(v:string)=>void;
+ routeProvider:string;setRouteProvider:(v:string)=>void;upstreamModel:string;setUpstreamModel:(v:string)=>void;
+ fallbackModels:string;setFallbackModels:(v:string)=>void;
+ routeStrategy:"fallback"|"round-robin"|"smart"|"fusion";
+ setRouteStrategy:(v:"fallback"|"round-robin"|"smart"|"fusion")=>void;
+ stickyLimit:string;setStickyLimit:(v:string)=>void;
+ smartDecisionProvider:string;setSmartDecisionProvider:(v:string)=>void;
+ smartDecisionModel:string;setSmartDecisionModel:(v:string)=>void;
+ smartPolicy:"smart-switch"|"strict-lock"|"per-turn";setSmartPolicy:(v:"smart-switch"|"strict-lock"|"per-turn")=>void;
+ smartConfidence:string;setSmartConfidence:(v:string)=>void;smartTimeout:string;setSmartTimeout:(v:string)=>void;
+ fusionModels:string;setFusionModels:(v:string)=>void;judgeModel:string;setJudgeModel:(v:string)=>void;
+ fusionMinPanel:string;setFusionMinPanel:(v:string)=>void;fusionTimeout:string;setFusionTimeout:(v:string)=>void;
+ onSave:(e:FormEvent)=>void;onRemove:(n:string)=>void;
+}){
+ const routeDescription=(route:Route)=>{
+  const strategy=route.strategy||"fallback";
+  if(strategy==="round-robin")return "ROUND ROBIN · STICKY "+(route.sticky_limit||1);
+  if(strategy==="smart")return "SMART · "+(route.smart_policy||"smart-switch").toUpperCase();
+  if(strategy==="fusion")return "FUSION · "+(route.fusion_models?.length||0)+" PANEL MODELS";
+  return "SEQUENTIAL FALLBACK";
+ };
+ return <div className="routing-layout">
+  <section className="panel route-create">
+   <div className="panel-heading"><div><div className="eyebrow">ROUTING COMBO</div><h3>Create a combo</h3></div><div className="icon-tile violet"><Icon name="route"/></div></div>
+   <p className="muted-copy">Expose a stable model name to clients and route it through a tested policy. Every strategy runs in the Go gateway.</p>
+   <form onSubmit={onSave}>
+    <label>COMBO NAME</label>
+    <input required value={alias} onChange={e=>setAlias(e.target.value)} placeholder="e.g. fantom-coding"/>
+    <label>PRIMARY PROVIDER</label>
+    <select required value={routeProvider} onChange={e=>setRouteProvider(e.target.value)}>{providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select>
+    <label>PRIMARY UPSTREAM MODEL</label>
+    <input required value={upstreamModel} onChange={e=>setUpstreamModel(e.target.value)} placeholder="e.g. meta/llama-3.3-70b-instruct"/>
+    <label>COMBO STRATEGY</label>
+    <select value={routeStrategy} onChange={e=>setRouteStrategy(e.target.value as "fallback"|"round-robin"|"smart"|"fusion")}>
+     <option value="fallback">Sequential fallback</option>
+     <option value="round-robin">Round robin + failover</option>
+     <option value="smart">Smart Router (decision model)</option>
+     <option value="fusion">Fusion (parallel panel + judge)</option>
+    </select>
+    {routeStrategy==="round-robin"&&<div className="combo-advanced-fields">
+     <label>STICKY LIMIT (REQUESTS PER MODEL)</label>
+     <input type="number" min="1" max="10000" value={stickyLimit} onChange={e=>setStickyLimit(e.target.value)}/>
+     <small>Rotate the first-choice model after this many requests. Failed choices still fall through to the remaining candidates.</small>
+    </div>}
+    {routeStrategy==="smart"&&<div className="combo-advanced-fields">
+     <div className="eyebrow">SYSTEM ONE DECISION POLICY</div>
+     <label>DECISION PROVIDER</label>
+     <select required value={smartDecisionProvider} onChange={e=>setSmartDecisionProvider(e.target.value)}>
+      <option value="">Select a decision provider</option>
+      {providers.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}
+     </select>
+     <label>DECISION MODEL ID</label>
+     <input required value={smartDecisionModel} onChange={e=>setSmartDecisionModel(e.target.value)} placeholder="e.g. router-model"/>
+     <label>SESSION POLICY</label>
+     <select value={smartPolicy} onChange={e=>setSmartPolicy(e.target.value as "smart-switch"|"strict-lock"|"per-turn")}>
+      <option value="smart-switch">Smart Switch — adaptive session choice</option>
+      <option value="strict-lock">Strict Lock — lock first decision for session</option>
+      <option value="per-turn">Per Turn — decide every request</option>
+     </select>
+     <label>MINIMUM CONFIDENCE (0.50–0.95)</label>
+     <input type="number" min="0.5" max="0.95" step="0.05" value={smartConfidence} onChange={e=>setSmartConfidence(e.target.value)}/>
+     <label>DECISION TIMEOUT (SECONDS)</label>
+     <input type="number" min="1" max="30" value={smartTimeout} onChange={e=>setSmartTimeout(e.target.value)}/>
+     <small>Decision errors, invalid choices and timeouts fail open to the configured candidate order. Smart Switch retains the previous session model when confidence is below the threshold.</small>
+    </div>}
+    {routeStrategy==="fusion"&&<div className="combo-advanced-fields">
+     <div className="eyebrow">PARALLEL EXPERT PANEL</div>
+     <label>PANEL MODEL IDS / COMBO ALIASES</label>
+     <textarea required rows={4} value={fusionModels} onChange={e=>setFusionModels(e.target.value)} placeholder={"provider-model-a\nprovider-model-b\nprovider-model-c"}/>
+     <small>Enter 2–8 models, one per line or separated by commas. They are called concurrently; tools are disabled for panel calls.</small>
+     <label>JUDGE MODEL ID (OPTIONAL)</label>
+     <input value={judgeModel} onChange={e=>setJudgeModel(e.target.value)} placeholder="Defaults to the first panel model"/>
+     <label>MINIMUM SUCCESSFUL PANEL MODELS</label>
+     <input type="number" min="2" max="8" value={fusionMinPanel} onChange={e=>setFusionMinPanel(e.target.value)}/>
+     <label>FUSION TIMEOUT (SECONDS)</label>
+     <input type="number" min="5" max="180" value={fusionTimeout} onChange={e=>setFusionTimeout(e.target.value)}/>
+     <small>When a panel does not reach quorum, the gateway returns a retryable error. If only one panel model responds, its answer is returned as a degraded result.</small>
+    </div>}
+    <details className="combo-advanced">
+     <summary>Fallback models (optional)</summary>
+     <label>FALLBACK MODEL ALIASES</label>
+     <input value={fallbackModels} onChange={e=>setFallbackModels(e.target.value)} placeholder="backup-fast, backup-stable"/>
+     <small>Used by sequential fallback, round robin and smart routing. Fusion uses its separate panel list.</small>
+    </details>
+    <button className="primary wide" disabled={!providers.length}><Icon name="plus" size={15}/> Save combo</button>
+   </form>
+  </section>
+  <section className="panel">
+   <div className="panel-heading"><div><div className="eyebrow">ACTIVE COMBOS</div><h3>Your combos</h3></div><span className="tag">{Object.keys(routes).length} ROUTES</span></div>
+   <div className="route-list">
+    {Object.entries(routes).map(([name,route])=><div className="route-row" key={name}>
+     <div className="route-source"><code>{name}</code><small>PUBLIC MODEL</small></div>
+     <div className="route-arrow"><Icon name="route" size={17}/></div>
+     <div className="route-target"><b>{route.upstream_model}</b><small>{route.provider} · {routeDescription(route)}</small>
+      {route.fallback_models&&route.fallback_models.length>0&&<small className="fallback-hint">fallback: {route.fallback_models.join(" → ")}</small>}
+      {route.fusion_models&&route.fusion_models.length>0&&<small className="fallback-hint">panel: {route.fusion_models.join(" · ")}</small>}
+      {route.strategy==="smart"&&route.smart_decision_provider&&<small className="fallback-hint">decision: {route.smart_decision_provider}/{route.smart_decision_model}</small>}
+     </div>
+     <button className="icon-button" onClick={()=>onRemove(name)} title="Remove route"><Icon name="trash" size={14}/></button>
+    </div>)}
+    {Object.keys(routes).length===0&&<div className="empty">No combos yet. Create a combo to publish one stable model ID to your clients.</div>}
+   </div>
+  </section>
+ </div>;
+}
+function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){
+ const max=Math.max(1,...Object.values(usage.by_model||{}));
+ const priced=usage.priced_requests||0;
+ const coverage=usage.cost_coverage_percent||0;
+ const cost=priced>0?new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:4}).format(usage.total_estimated_cost_usd||0):"—";
+ return <>
+  <div className="metrics-grid three">
+   <Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/>
+   <Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/>
+   <Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/>
+  </div>
+  <div className="metrics-grid three usage-token-metrics">
+   <Metric label="PROMPT TOKENS" value={formatNumber(usage.total_prompt_tokens||0)} detail="Reported by providers" glyph="terminal" tone="blue"/>
+   <Metric label="COMPLETION TOKENS" value={formatNumber(usage.total_completion_tokens||0)} detail="Reported by providers" glyph="terminal" tone="violet"/>
+   <Metric label="TOTAL TOKENS" value={formatNumber(usage.total_tokens||0)} detail="No estimates included" glyph="chart" tone="green"/>
+  </div>
+  <div className="metrics-grid two">
+   <Metric label="ESTIMATED COST" value={cost} detail={priced?priced+" requests priced from configured model rates":"No model pricing configured"} glyph="chart" tone="violet"/>
+   <Metric label="PRICING COVERAGE" value={priced?coverage.toFixed(1)+"%":"—"} detail={priced?formatNumber(usage.unpriced_requests||0)+" requests have no configured price":"Configure per-model rates in Providers"} glyph="check" tone="green"/>
+  </div>
+  <div className="content-grid">
+   <section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>
+    {Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}
+    {Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}
+   </section>
+   <section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div>
+    <div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div>
+    <p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p>
+    <div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div>
+    <div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div>
+   </section>
+  </div>
+  <section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section>
+  <details className="inline-tool-details request-explorer"><summary>Open full request explorer <span>{requests.length} retained requests</span></summary><LogsPage requests={requests}/></details>
+ </>;
+}
 function LogsPage({requests}:{requests:Log[]}) {
  const [query,setQuery]=useState("");
  const [status,setStatus]=useState("all");
@@ -347,4 +638,4 @@ function LogsPage({requests}:{requests:Log[]}) {
   {filtered.length===0&&<div className="empty">{requests.length===0?"No requests have passed through this gateway yet.":"No requests match these filters."}</div>}
  </section>;
 }
-function RequestTable({rows}:{rows:Log[]}){return <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>MODEL</th><th>PROVIDER</th><th>RUNTIME / ACCOUNT</th><th>STATUS</th><th>LATENCY</th><th>TOKENS</th><th>RETRIES</th><th>WHEN</th></tr></thead><tbody>{rows.map(r=><tr key={r.id+"-"+r.at}><td><code className="request-id">{(r.id||"—").slice(0,12)}</code></td><td><code className="model-code">{r.model||"—"}</code>{r.streaming&&<span className="stream-tag">SSE</span>}</td><td>{r.provider||"—"}</td><td title={r.endpoint||r.source||""}><span>{r.engine==="cliproxy"?"Go runtime":"Gateway"}</span>{r.account&&<small className="account-subline">{r.account}</small>}{r.ttft_ms!==undefined&&<small className="account-subline">TTFT {r.ttft_ms} ms</small>}</td><td><span className={cls("status-code",r.status>=200&&r.status<400?"good":"bad")}>{r.status||"—"}</span></td><td>{r.latency_ms} ms</td><td>{r.total_tokens?formatNumber(r.total_tokens):"—"}</td><td><span title={(r.upstream_attempts||0)+" upstream attempts"}>{r.credential_retries||0} key · {r.fallback_attempts||0} fallback</span></td><td>{ago(r.at)}</td></tr>)}</tbody></table></div>}
+function RequestTable({rows}:{rows:Log[]}){return <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>MODEL</th><th>PROVIDER</th><th>RUNTIME / ACCOUNT</th><th>STATUS</th><th>LATENCY</th><th>TOKENS</th><th>COST</th><th>RETRIES</th><th>WHEN</th></tr></thead><tbody>{rows.map(r=><tr key={r.id+"-"+r.at}><td><code className="request-id">{(r.id||"—").slice(0,12)}</code></td><td><code className="model-code">{r.model||"—"}</code>{r.streaming&&<span className="stream-tag">SSE</span>}{r.upstream_model&&r.upstream_model!==r.model&&<small className="account-subline">{r.upstream_model}</small>}{r.routing_strategy&&<small className="account-subline">{r.routing_strategy}</small>}</td><td>{r.provider||"—"}</td><td title={r.endpoint||r.source||""}><span>{r.engine==="cliproxy"?"Go runtime":r.engine==="fusion"?"Fusion":"Gateway"}</span>{r.account&&<small className="account-subline">{r.account}</small>}{r.ttft_ms!==undefined&&<small className="account-subline">TTFT {r.ttft_ms} ms</small>}</td><td><span className={cls("status-code",r.status>=200&&r.status<400?"good":"bad")}>{r.status||"—"}</span></td><td>{r.latency_ms} ms</td><td>{r.total_tokens?formatNumber(r.total_tokens):"—"}</td><td>{r.cost_known?new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:5}).format(r.cost_usd||0):"—"}</td><td><span title={(r.upstream_attempts||0)+" upstream attempts"}>{r.credential_retries||0} key · {r.fallback_attempts||0} fallback</span></td><td>{ago(r.at)}</td></tr>)}</tbody></table></div>}

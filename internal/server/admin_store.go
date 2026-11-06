@@ -66,7 +66,11 @@ type requestRecord struct {
 	At               time.Time `json:"at"`
 	Provider         string    `json:"provider"`
 	Model            string    `json:"model"`
+	UpstreamModel    string    `json:"upstream_model,omitempty"`
 	Status           int       `json:"status"`
+	CostUSD          float64   `json:"cost_usd,omitempty"`
+	CostKnown        bool      `json:"cost_known,omitempty"`
+	RoutingStrategy  string    `json:"routing_strategy,omitempty"`
 	LatencyMS        int64     `json:"latency_ms"`
 	Streaming        bool      `json:"streaming"`
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
@@ -75,6 +79,12 @@ type requestRecord struct {
 	UpstreamAttempts int       `json:"upstream_attempts,omitempty"`
 	CredentialRetries int      `json:"credential_retries,omitempty"`
 	FallbackAttempts int       `json:"fallback_attempts,omitempty"`
+	DecisionPromptTokens int64  `json:"-"`
+	DecisionCompletionTokens int64 `json:"-"`
+	DecisionTotalTokens int64    `json:"-"`
+	DecisionCostUSD float64      `json:"-"`
+	DecisionCostKnown bool       `json:"-"`
+	DecisionUsageSeen bool       `json:"-"`
 	Engine           string    `json:"engine,omitempty"`
 	Account           string    `json:"account,omitempty"`
 	TTFTMS            int64     `json:"ttft_ms,omitempty"`
@@ -82,12 +92,40 @@ type requestRecord struct {
 	Source            string    `json:"source,omitempty"`
 }
 
+type capacityAdapterPool struct {
+	Enabled    bool     `json:"enabled"`
+	RoundRobin bool     `json:"roundRobin,omitempty"`
+	Models     []string `json:"models"`
+}
+
+// UnmarshalJSON keeps compatibility with the original persisted string-array pools.
+func (p *capacityAdapterPool) UnmarshalJSON(data []byte) error {
+	var legacy []string
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed,"[") {
+		if err:=json.Unmarshal([]byte(trimmed),&legacy);err!=nil{return err}
+		p.Enabled=len(legacy)>0
+		p.Models=append([]string(nil),legacy...)
+		return nil
+	}
+	var value struct {
+		Enabled *bool `json:"enabled"`
+		RoundRobin bool `json:"roundRobin"`
+		Models []string `json:"models"`
+	}
+	if err:=json.Unmarshal(data,&value);err!=nil{return err}
+	p.Enabled=value.Enabled==nil || *value.Enabled
+	p.RoundRobin=value.RoundRobin
+	p.Models=append([]string(nil),value.Models...)
+	return nil
+}
+
 type adminState struct {
 	Version            int                     `json:"version"`
 	DefaultProvider    string                  `json:"default_provider"`
 	Providers          []persistedProvider     `json:"providers"`
 	Routes             map[string]config.Route `json:"routes"`
-	CapacityAdapters   map[string][]string     `json:"capacity_adapters,omitempty"`
+	CapacityAdapters   map[string]capacityAdapterPool `json:"capacity_adapters,omitempty"`
 	DefaultTokenSaver  string                  `json:"default_token_saver"`
 	DefaultCodeMode    string                  `json:"default_code_mode"`
 	ClientKeys         []storedClientKey       `json:"client_keys"`
@@ -114,14 +152,14 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 	store.data = adminState{Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes, DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode}
 	for _, p := range cfg.Providers { store.data.Providers = append(store.data.Providers, persistProvider(p)) }
 	if store.data.Routes == nil { store.data.Routes = map[string]config.Route{} }
-	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string][]string{} }
+	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string]capacityAdapterPool{} }
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		var loaded adminState
 		if decodeErr := json.Unmarshal(raw, &loaded); decodeErr != nil { return nil, fmt.Errorf("decode Fantom state: %w", decodeErr) }
 		if loaded.Version != 1 { return nil, fmt.Errorf("unsupported Fantom state version %d", loaded.Version) }
 		if loaded.Routes == nil { loaded.Routes = map[string]config.Route{} }
-		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string][]string{} }
+		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string]capacityAdapterPool{} }
 		if loaded.DefaultTokenSaver == "" { loaded.DefaultTokenSaver = cfg.DefaultTokenSaver }
 		if loaded.DefaultCodeMode == "" { loaded.DefaultCodeMode = cfg.DefaultCodeMode }
 		if len(loaded.Providers) == 0 { loaded.Providers = store.data.Providers }
@@ -152,8 +190,11 @@ func (d *adminStore) snapshot() adminState {
 	out := d.data
 	out.Providers = append([]persistedProvider(nil), d.data.Providers...)
 	out.Routes = make(map[string]config.Route,len(d.data.Routes)); for k,v := range d.data.Routes { out.Routes[k]=v }
-	out.CapacityAdapters = make(map[string][]string, len(d.data.CapacityAdapters))
-	for capability, models := range d.data.CapacityAdapters { out.CapacityAdapters[capability] = append([]string(nil), models...) }
+	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(d.data.CapacityAdapters))
+	for capability, pool := range d.data.CapacityAdapters {
+		pool.Models = append([]string(nil), pool.Models...)
+		out.CapacityAdapters[capability] = pool
+	}
 	for i := range out.Providers {
 		out.Providers[i].ModelCapabilities = cloneModelCapabilities(out.Providers[i].ModelCapabilities)
 		out.Providers[i].ModelPricing = cloneModelPricing(out.Providers[i].ModelPricing)
@@ -223,6 +264,9 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		route.FallbackModels = cleanFallbacks
 
 		if strategy == "smart" {
+			if len(route.FallbackModels) == 0 {
+				return fmt.Errorf("route %q smart routing requires at least one alternative candidate model", alias)
+			}
 			route.SmartDecisionProvider = strings.TrimSpace(route.SmartDecisionProvider)
 			route.SmartDecisionModel = strings.TrimSpace(route.SmartDecisionModel)
 			if !providers[route.SmartDecisionProvider] { return fmt.Errorf("route %q smart decision provider is unknown", alias) }
@@ -248,7 +292,7 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		}
 
 		if strategy == "fusion" {
-			if len(route.FusionModels) == 0 { route.FusionModels = append([]string{alias}, route.FallbackModels...) }
+			if len(route.FusionModels) == 0 { route.FusionModels = append([]string(nil), route.FallbackModels...) }
 			if len(route.FusionModels) < 2 || len(route.FusionModels) > 8 {
 				return fmt.Errorf("route %q fusion requires between 2 and 8 panel models", alias)
 			}
@@ -281,19 +325,23 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 	return d.saveLocked()
 }
 
-func (d *adminStore) setCapacityAdapters(adapters map[string][]string) error {
+func (d *adminStore) setCapacityAdapters(adapters map[string]capacityAdapterPool) error {
 	allowed := map[string]bool{"vision":true, "pdf":true, "audio_input":true, "video_input":true}
-	clean := make(map[string][]string, len(adapters))
-	for capability, models := range adapters {
+	clean := make(map[string]capacityAdapterPool, len(adapters))
+	for capability, pool := range adapters {
 		capability = strings.ToLower(strings.TrimSpace(capability))
 		if !allowed[capability] { return fmt.Errorf("unsupported capacity adapter capability %q", capability) }
 		seen := map[string]bool{}
-		for _, model := range models {
+		models := make([]string,0,len(pool.Models))
+		for _, model := range pool.Models {
 			model = strings.TrimSpace(model)
 			if model == "" { return fmt.Errorf("capacity adapter %q contains an empty model", capability) }
-			if !seen[model] { clean[capability] = append(clean[capability], model); seen[model] = true }
-			if len(clean[capability]) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
+			if !seen[model] { models = append(models,model); seen[model] = true }
+			if len(models) > 16 { return fmt.Errorf("capacity adapter %q supports at most 16 models", capability) }
 		}
+		pool.Models=models
+		if len(models)==0 { pool.Enabled=false; pool.RoundRobin=false }
+		clean[capability]=pool
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -435,22 +483,26 @@ func (d *adminStore) appendProviderFromInput(in providerInput, existing *config.
 	models:=in.Models; if len(models)==0 { models=[]string{"*"} }
 	for i:=range models { models[i]=strings.TrimSpace(models[i]) }
 	timeout:=in.TimeoutSeconds; if timeout<=0 { timeout=100 }; if timeout>600 { return config.Provider{},errors.New("timeout cannot exceed 600 seconds") }
-for model, caps := range in.ModelCapabilities {
+	cleanCapabilities := make(map[string]config.ModelCapabilities, len(in.ModelCapabilities))
+	for model, caps := range in.ModelCapabilities {
 		model = strings.TrimSpace(model)
 		if model == "" { return config.Provider{}, errors.New("model capability key cannot be empty") }
 		if caps.ContextWindow < 0 || caps.ContextWindow > 10000000 || caps.MaxOutput < 0 || caps.MaxOutput > 1000000 {
 			return config.Provider{}, fmt.Errorf("model %q has invalid context/output limits", model)
 		}
-		in.ModelCapabilities[model] = caps
+		cleanCapabilities[model] = caps
 	}
+	in.ModelCapabilities = cleanCapabilities
+	cleanPricing := make(map[string]config.ModelPricing, len(in.ModelPricing))
 	for model, pricing := range in.ModelPricing {
 		model = strings.TrimSpace(model)
 		if model == "" { return config.Provider{}, errors.New("model pricing key cannot be empty") }
 		if pricing.InputPerMillionUSD < 0 || pricing.OutputPerMillionUSD < 0 || pricing.InputPerMillionUSD > 1000000 || pricing.OutputPerMillionUSD > 1000000 {
 			return config.Provider{}, fmt.Errorf("model %q has invalid pricing; rates must be between 0 and 1000000 USD per million tokens", model)
 		}
-		in.ModelPricing[model] = pricing
+		cleanPricing[model] = pricing
 	}
+	in.ModelPricing = cleanPricing
 	p:=config.Provider{ID:id,BaseURL:base,ChatPath:chatPath,ModelsURL:strings.TrimSpace(in.ModelsURL),AuthType:auth,Models:models,TimeoutSeconds:timeout,ModelCapabilities:cloneModelCapabilities(in.ModelCapabilities),ModelPricing:cloneModelPricing(in.ModelPricing)}
 	if existing!=nil {
 		if in.APIKey=="" && len(in.APIKeys)==0 { p.APIKeys=append([]string(nil),existing.APIKeys...) }
