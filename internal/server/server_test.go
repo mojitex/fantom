@@ -253,6 +253,7 @@ func TestComboStrategyValidationAndLegacyDefault(t *testing.T) {
 	if err := handler.store.setRoutes(map[string]config.Route{
 		"legacy-combo": {Provider: "primary", UpstreamModel: "model-a"},
 		"rr-combo": {Provider: "primary", UpstreamModel: "model-a", Strategy: "ROUND-ROBIN"},
+		"sticky-combo": {Provider: "primary", UpstreamModel: "model-a", Strategy: "round-robin", StickyLimit: 4},
 	}); err != nil {
 		t.Fatalf("setRoutes() rejected supported strategies: %v", err)
 	}
@@ -260,13 +261,21 @@ func TestComboStrategyValidationAndLegacyDefault(t *testing.T) {
 	if routes["legacy-combo"].Strategy != "fallback" {
 		t.Fatalf("legacy route strategy = %q, want fallback", routes["legacy-combo"].Strategy)
 	}
-	if routes["rr-combo"].Strategy != "round-robin" {
-		t.Fatalf("round-robin strategy = %q, want normalized round-robin", routes["rr-combo"].Strategy)
+	if routes["rr-combo"].Strategy != "round-robin" || routes["rr-combo"].StickyLimit != 1 {
+		t.Fatalf("round-robin defaults = strategy %q, sticky %d; want round-robin/1", routes["rr-combo"].Strategy, routes["rr-combo"].StickyLimit)
+	}
+	if routes["sticky-combo"].StickyLimit != 4 {
+		t.Fatalf("sticky limit = %d, want 4", routes["sticky-combo"].StickyLimit)
 	}
 	if err := handler.store.setRoutes(map[string]config.Route{
 		"invalid": {Provider: "primary", UpstreamModel: "model-a", Strategy: "smartest"},
 	}); err == nil {
 		t.Fatal("setRoutes() accepted an unsupported combo strategy")
+	}
+	if err := handler.store.setRoutes(map[string]config.Route{
+		"invalid-sticky": {Provider: "primary", UpstreamModel: "model-a", Strategy: "round-robin", StickyLimit: 10001},
+	}); err == nil {
+		t.Fatal("setRoutes() accepted an out-of-range sticky limit")
 	}
 }
 
