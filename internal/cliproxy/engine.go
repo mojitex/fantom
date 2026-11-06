@@ -191,6 +191,13 @@ func New(adminKey string) (*Engine, error) {
 	}
 	apiProxy.FlushInterval = -1
 	apiProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(proxyErr, &maxBytesErr) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = io.WriteString(w, "{\"error\":{\"message\":\"request body exceeds the configured size limit\",\"type\":\"invalid_request_error\"}}\n")
+			return
+		}
 		http.Error(w, "Fantom routing engine unavailable", http.StatusBadGateway)
 	}
 

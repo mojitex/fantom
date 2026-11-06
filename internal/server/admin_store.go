@@ -45,11 +45,32 @@ func cloneModelPricing(source map[string]config.ModelPricing) map[string]config.
 	for key, value := range source { out[key] = value }
 	return out
 }
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
 func persistProvider(p config.Provider) persistedProvider {
-	return persistedProvider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
+	return persistedProvider{
+		ID: p.ID, BaseURL: p.BaseURL, ChatPath: p.ChatPath, ModelsURL: p.ModelsURL,
+		AuthType: p.AuthType, Models: append([]string(nil), p.Models...), TimeoutSeconds: p.TimeoutSeconds,
+		Headers: cloneStringMap(p.Headers), ModelCapabilities: cloneModelCapabilities(p.ModelCapabilities),
+		ModelPricing: cloneModelPricing(p.ModelPricing), APIKeys: append([]string(nil), p.APIKeys...),
+	}
 }
 func (p persistedProvider) runtime() config.Provider {
-	return config.Provider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
+	return config.Provider{
+		ID: p.ID, BaseURL: p.BaseURL, ChatPath: p.ChatPath, ModelsURL: p.ModelsURL,
+		AuthType: p.AuthType, Models: append([]string(nil), p.Models...), TimeoutSeconds: p.TimeoutSeconds,
+		Headers: cloneStringMap(p.Headers), ModelCapabilities: cloneModelCapabilities(p.ModelCapabilities),
+		ModelPricing: cloneModelPricing(p.ModelPricing), APIKeys: append([]string(nil), p.APIKeys...),
+	}
 }
 
 type storedClientKey struct {
@@ -140,6 +161,8 @@ type adminState struct {
 
 type adminStore struct {
 	mu        sync.RWMutex
+	persistMu sync.Mutex
+	requestStart int
 	path      string
 	data      adminState
 	dirty     bool
@@ -170,6 +193,9 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 		var loaded adminState
 		if decodeErr := json.Unmarshal(raw, &loaded); decodeErr != nil { return nil, fmt.Errorf("decode Fantom state: %w", decodeErr) }
 		if loaded.Version != 1 { return nil, fmt.Errorf("unsupported Fantom state version %d", loaded.Version) }
+		if len(loaded.Requests) > 5000 {
+			loaded.Requests = append([]requestRecord(nil), loaded.Requests[len(loaded.Requests)-5000:]...)
+		}
 		if loaded.Routes == nil { loaded.Routes = map[string]config.Route{} }
 		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string]capacityAdapterPool{} }
 		if loaded.DefaultTokenSaver == "" { loaded.DefaultTokenSaver = cfg.DefaultTokenSaver }
@@ -194,33 +220,106 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 	return store, nil
 }
 
-func (d *adminStore) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(d.path), 0700); err != nil { return fmt.Errorf("create data directory: %w",err) }
-	raw, err := json.MarshalIndent(d.data, "", "  ")
-	if err != nil { return err }
+func (d *adminStore) writeState(state adminState) error {
+	if err := os.MkdirAll(filepath.Dir(d.path), 0700); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
 	tmp := d.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0600); err != nil { return fmt.Errorf("write state: %w",err) }
-	if err := os.Rename(tmp, d.path); err != nil { _ = os.Remove(tmp); return fmt.Errorf("commit state: %w",err) }
+	if err := os.WriteFile(tmp, raw, 0600); err != nil {
+		return fmt.Errorf("write state: %w", err)
+	}
+	if err := os.Rename(tmp, d.path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit state: %w", err)
+	}
+	return nil
+}
+
+// saveLocked runs while mu is held. The separate persistence mutex serializes
+// atomic state-file replacement with the asynchronous telemetry flusher.
+func (d *adminStore) saveLocked() error {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
+	if err := d.writeState(d.snapshotForPersistenceLocked()); err != nil {
+		return err
+	}
 	d.dirty = false
 	return nil
 }
 
-func (d *adminStore) snapshot() adminState {
-	d.mu.RLock(); defer d.mu.RUnlock()
-	out := d.data
-	out.Providers = append([]persistedProvider(nil), d.data.Providers...)
-	out.Routes = make(map[string]config.Route,len(d.data.Routes)); for k,v := range d.data.Routes { out.Routes[k]=v }
-	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(d.data.CapacityAdapters))
-	for capability, pool := range d.data.CapacityAdapters {
+func cloneAdminState(source adminState, includeHistory bool) adminState {
+	out := source
+	out.Providers = make([]persistedProvider, len(source.Providers))
+	for i, provider := range source.Providers {
+		out.Providers[i] = provider
+		out.Providers[i].Models = append([]string(nil), provider.Models...)
+		out.Providers[i].APIKeys = append([]string(nil), provider.APIKeys...)
+		out.Providers[i].Headers = cloneStringMap(provider.Headers)
+		out.Providers[i].ModelCapabilities = cloneModelCapabilities(provider.ModelCapabilities)
+		out.Providers[i].ModelPricing = cloneModelPricing(provider.ModelPricing)
+	}
+	out.Routes = make(map[string]config.Route, len(source.Routes))
+	for key, route := range source.Routes {
+		route.FallbackModels = append([]string(nil), route.FallbackModels...)
+		route.FusionModels = append([]string(nil), route.FusionModels...)
+		out.Routes[key] = route
+	}
+	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(source.CapacityAdapters))
+	for capability, pool := range source.CapacityAdapters {
 		pool.Models = append([]string(nil), pool.Models...)
 		out.CapacityAdapters[capability] = pool
 	}
-	for i := range out.Providers {
-		out.Providers[i].ModelCapabilities = cloneModelCapabilities(out.Providers[i].ModelCapabilities)
-		out.Providers[i].ModelPricing = cloneModelPricing(out.Providers[i].ModelPricing)
+	if includeHistory {
+		out.ClientKeys = append([]storedClientKey(nil), source.ClientKeys...)
+		out.Requests = append([]requestRecord(nil), source.Requests...)
+	} else {
+		out.ClientKeys = nil
+		out.Requests = nil
 	}
-	out.ClientKeys = append([]storedClientKey(nil),d.data.ClientKeys...)
-	out.Requests = append([]requestRecord(nil),d.data.Requests...)
+	return out
+}
+
+// orderedRequestsLocked returns the retained request history from oldest to newest.
+func (d *adminStore) orderedRequestsLocked() []requestRecord {
+	count := len(d.data.Requests)
+	if count == 0 {
+		return nil
+	}
+	out := make([]requestRecord, count)
+	if count < 5000 || d.requestStart == 0 {
+		copy(out, d.data.Requests)
+		return out
+	}
+	n := copy(out, d.data.Requests[d.requestStart:])
+	copy(out[n:], d.data.Requests[:d.requestStart])
+	return out
+}
+
+func (d *adminStore) snapshotForPersistenceLocked() adminState {
+	out := cloneAdminState(d.data, false)
+	out.ClientKeys = append([]storedClientKey(nil), d.data.ClientKeys...)
+	out.Requests = d.orderedRequestsLocked()
+	return out
+}
+
+// routingSnapshot excludes usage history and client-key metadata from inference
+// hot paths, keeping their allocation cost independent of retained telemetry.
+func (d *adminStore) routingSnapshot() adminState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return cloneAdminState(d.data, false)
+}
+
+func (d *adminStore) snapshot() adminState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := cloneAdminState(d.data, false)
+	out.ClientKeys = append([]storedClientKey(nil), d.data.ClientKeys...)
+	out.Requests = d.orderedRequestsLocked()
 	return out
 }
 
@@ -418,10 +517,15 @@ func (d *adminStore) appendRequests(rows []requestRecord) {
 	if d == nil || len(rows) == 0 {
 		return
 	}
+	const maxRetainedRequests = 5000
 	d.mu.Lock()
-	d.data.Requests = append(d.data.Requests, rows...)
-	if len(d.data.Requests) > 5000 {
-		d.data.Requests = append([]requestRecord(nil), d.data.Requests[len(d.data.Requests)-5000:]...)
+	for _, row := range rows {
+		if len(d.data.Requests) < maxRetainedRequests {
+			d.data.Requests = append(d.data.Requests, row)
+			continue
+		}
+		d.data.Requests[d.requestStart] = row
+		d.requestStart = (d.requestStart + 1) % maxRetainedRequests
 	}
 	d.dirty = true
 	d.mu.Unlock()
@@ -469,12 +573,34 @@ func (d *adminStore) runPersistence() {
 
 func (d *adminStore) flushRequests() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if !d.dirty {
+		d.mu.Unlock()
 		return
 	}
-	if err := d.saveLocked(); err != nil && d.logger != nil {
-		d.logger.Error("could not persist request history batch", "error", err)
+	state := d.snapshotForPersistenceLocked()
+	d.dirty = false
+	// All writers acquire mu before persistMu. Release mu before marshaling
+	// and disk I/O so inference and admin reads are not blocked by storage.
+	d.persistMu.Lock()
+	d.mu.Unlock()
+
+	err := d.writeState(state)
+	d.persistMu.Unlock()
+	if err != nil {
+		d.mu.Lock()
+		d.dirty = true
+		d.mu.Unlock()
+		if d.logger != nil {
+			d.logger.Error("could not persist request history batch", "error", err)
+		}
+		// A transient disk error must not leave telemetry dirty indefinitely.
+		// The buffered wake-up is coalesced with any concurrently appended rows.
+		if d.flushWake != nil {
+			select {
+			case d.flushWake <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 

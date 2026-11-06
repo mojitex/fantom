@@ -70,6 +70,10 @@ type Config struct {
 	GatewayAPIKeys     []string         `json:"-"`
 	StaticDirectory    string           `json:"-"`
 	MaxRequestBytes    int64            `json:"-"`
+	MaxConcurrentRequests int            `json:"-"`
+	MaxConcurrentUpstreamRequests int     `json:"-"`
+	MaxInflightBodyBytes int64              `json:"-"`
+	MaxConcurrentPerProvider int         `json:"-"`
 	DefaultTokenSaver             string `json:"-"`
 	DefaultCodeMode               string `json:"-"`
 	DefaultCavemanMode            string `json:"-"`
@@ -104,7 +108,34 @@ func Load() (*Config, error) {
 		return nil, errors.New("set GATEWAY_API_KEY or GATEWAY_API_KEYS; the gateway refuses to start without client authentication")
 	}
 	cfg.StaticDirectory = envOr("STATIC_DIR", "./dashboard/out")
-	cfg.MaxRequestBytes = int64(ParsePositiveIntEnv("MAX_REQUEST_MB", 32)) << 20
+	maxRequestMB := ParsePositiveIntEnv("MAX_REQUEST_MB", 32)
+	if maxRequestMB > 8192 {
+		return nil, errors.New("MAX_REQUEST_MB cannot exceed 8192")
+	}
+	cfg.MaxRequestBytes = int64(maxRequestMB) << 20
+	bodyBudgetMB := ParsePositiveIntEnv("FANTOM_MAX_INFLIGHT_BODY_MB", 256)
+	if bodyBudgetMB > 16384 {
+		return nil, errors.New("FANTOM_MAX_INFLIGHT_BODY_MB cannot exceed 16384")
+	}
+	cfg.MaxInflightBodyBytes = int64(bodyBudgetMB) << 20
+	// JSON decoding, RawMessage projection and routed payload encoding can keep
+	// more than one request-body-sized allocation live at the same time.
+	minBodyBudget := cfg.MaxRequestBytes * 2
+	if cfg.MaxInflightBodyBytes < minBodyBudget {
+		cfg.MaxInflightBodyBytes = minBodyBudget
+	}
+	cfg.MaxConcurrentRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_REQUESTS", 256)
+	if cfg.MaxConcurrentRequests > 4096 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_REQUESTS cannot exceed 4096")
+	}
+	cfg.MaxConcurrentUpstreamRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", 512)
+	if cfg.MaxConcurrentUpstreamRequests > 8192 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS cannot exceed 8192")
+	}
+	cfg.MaxConcurrentPerProvider = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", 64)
+	if cfg.MaxConcurrentPerProvider > 2048 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_PER_PROVIDER cannot exceed 2048")
+	}
 	cfg.DefaultTokenSaver = strings.ToLower(envOr("FANTOM_TOKEN_SAVER", "safe"))
 	if cfg.DefaultTokenSaver != "safe" {
 		cfg.DefaultTokenSaver = "off"

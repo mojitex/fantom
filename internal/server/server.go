@@ -1,10 +1,10 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,9 +29,22 @@ type providerRuntime struct {
 	nextKey          atomic.Uint64
 	keyMu            sync.Mutex
 	keyCooldowns     []time.Time
+	inflight         chan struct{}
 	catalogMu        sync.Mutex
 	catalogModels    []string
 	catalogFetchedAt time.Time
+}
+
+func (p *providerRuntime) tryAcquire() (func(), bool) {
+	if p == nil || p.inflight == nil {
+		return func() {}, true
+	}
+	select {
+	case p.inflight <- struct{}{}:
+		return func() { <-p.inflight }, true
+	default:
+		return nil, false
+	}
 }
 
 func (p *providerRuntime) apiKey() string {
@@ -151,6 +164,16 @@ type Server struct {
 	capacityCursors sync.Map // map[capability]*atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
+	inferenceSlots       chan struct{}
+	upstreamSlots        chan struct{}
+	maxInflightBodyBytes int64
+	inflightBodyBytes    atomic.Int64
+	inferenceAdmissions atomic.Uint64
+	inferenceRejections atomic.Uint64
+	upstreamAdmissions  atomic.Uint64
+	upstreamRejections  atomic.Uint64
+	providerRejections  atomic.Uint64
+	bodyBudgetRejections atomic.Uint64
 }
 
 type modelItem struct {
@@ -187,19 +210,40 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 		}}
 		for _,p := range cfg.Providers { store.data.Providers=append(store.data.Providers,persistProvider(p)) }
 	}
-	s := &Server{config: cfg, providers: make(map[string]*providerRuntime), store:store, logger: logger}
+	maxConcurrent := cfg.MaxConcurrentRequests
+	if maxConcurrent <= 0 {
+		maxConcurrent = 256
+	}
+	maxConcurrentUpstream := cfg.MaxConcurrentUpstreamRequests
+	if maxConcurrentUpstream <= 0 {
+		maxConcurrentUpstream = 512
+	}
+	maxInflightBodyBytes := cfg.MaxInflightBodyBytes
+	if maxInflightBodyBytes <= 0 {
+		maxInflightBodyBytes = 256 << 20
+	}
+	if maxInflightBodyBytes < cfg.MaxRequestBytes*2 {
+		maxInflightBodyBytes = cfg.MaxRequestBytes * 2
+	}
+	s := &Server{
+		config: cfg, providers: make(map[string]*providerRuntime), store: store, logger: logger,
+		inferenceSlots: make(chan struct{}, maxConcurrent),
+		upstreamSlots: make(chan struct{}, maxConcurrentUpstream),
+		maxInflightBodyBytes: maxInflightBodyBytes,
+	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", s.authenticateAdmin(s.handleMetrics))
 	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
-	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
+	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.limitInference(s.handleChatCompletions)))
 	// Protocol endpoints not implemented by the compatibility gateway are served
 	// by the embedded CLIProxyAPI runtime after Fantom validates the client key.
-	mux.Handle("/v1/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/v1beta/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/openai/v1/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/backend-api/codex/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/v1/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/v1beta/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/openai/v1/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/backend-api/codex/", s.authenticate(s.limitInference(s.handleCoreAPI)))
 	mux.Handle("/v0/management", s.authenticateAdmin(s.handleCoreManagement))
 	mux.Handle("/v0/management/", s.authenticateAdmin(s.handleCoreManagement))
 	// v8 management routes power Fantom's native TypeScript account/quota control plane.
@@ -351,18 +395,42 @@ func (s *Server) runCoreUsageCollector(ctx context.Context, done chan struct{}) 
 		}
 	}
 }
-func newProviderRuntime(provider config.Provider) *providerRuntime {
-	if provider.ChatPath=="" { provider.ChatPath="/chat/completions" }
-	timeout:=provider.TimeoutSeconds; if timeout<=0 { timeout=100 }
-	dialer:=&net.Dialer{Timeout:10*time.Second,KeepAlive:30*time.Second}
-	transport:=&http.Transport{Proxy:http.ProxyFromEnvironment,DialContext:dialer.DialContext,ForceAttemptHTTP2:true,MaxIdleConns:256,MaxIdleConnsPerHost:64,IdleConnTimeout:90*time.Second,TLSHandshakeTimeout:10*time.Second,ExpectContinueTimeout:time.Second,ResponseHeaderTimeout:time.Duration(timeout)*time.Second}
-	return &providerRuntime{config:provider,client:&http.Client{Transport:transport}}
+func newProviderRuntime(provider config.Provider, maxConcurrent int) *providerRuntime {
+	if provider.ChatPath == "" {
+		provider.ChatPath = "/chat/completions"
+	}
+	timeout := provider.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 100
+	}
+	if maxConcurrent <= 0 {
+		maxConcurrent = 64
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment, DialContext: dialer.DialContext, ForceAttemptHTTP2: true,
+		MaxConnsPerHost: maxConcurrent, MaxIdleConns: maxConcurrent * 2,
+		MaxIdleConnsPerHost: maxConcurrent, IdleConnTimeout: 90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
+	}
+	return &providerRuntime{
+		config: provider, client: &http.Client{Transport: transport},
+		inflight: make(chan struct{}, maxConcurrent),
+	}
 }
 
 func (s *Server) reloadProviderRuntime() {
 	state:=s.store.snapshot()
 	next:=make(map[string]*providerRuntime,len(state.Providers))
-	for _,saved:=range state.Providers { p:=saved.runtime(); next[p.ID]=newProviderRuntime(p) }
+	maxPerProvider := s.config.MaxConcurrentPerProvider
+	if maxPerProvider <= 0 {
+		maxPerProvider = 64
+	}
+	for _, saved := range state.Providers {
+		p := saved.runtime()
+		next[p.ID] = newProviderRuntime(p, maxPerProvider)
+	}
 	s.providersMu.Lock()
 	old := s.providers
 	s.providers = next
@@ -406,6 +474,97 @@ func (s *Server) environmentKeyValid(provided string) bool {
 	return valid==1
 }
 
+// limitInference applies fail-fast admission control to model execution paths.
+// A bounded in-flight count protects memory, goroutines and upstream quotas during bursts.
+// tryAcquireUpstream bounds total in-flight Fantom-managed upstream calls,
+// including fan-out from Fusion and Smart routing. Saturated calls fail fast.
+func (s *Server) tryAcquireUpstream() (func(), bool) {
+	if s == nil || s.upstreamSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.upstreamSlots <- struct{}{}:
+		s.upstreamAdmissions.Add(1)
+		return func() { <-s.upstreamSlots }, true
+	default:
+		s.upstreamRejections.Add(1)
+		return nil, false
+	}
+}
+
+// tryAcquireBodyBytes reserves a weighted portion of the process-wide request
+// body memory budget. Unknown-length uploads reserve the configured per-request
+// maximum, preventing chunked uploads from bypassing memory admission.
+func (s *Server) tryAcquireBodyBytes(requested int64) (func(), bool) {
+	if s == nil || s.maxInflightBodyBytes <= 0 {
+		return func() {}, true
+	}
+	if requested <= 0 {
+		requested = 1
+	}
+	for {
+		current := s.inflightBodyBytes.Load()
+		if requested > s.maxInflightBodyBytes-current {
+			return nil, false
+		}
+		if s.inflightBodyBytes.CompareAndSwap(current, current+requested) {
+			return func() { s.inflightBodyBytes.Add(-requested) }, true
+		}
+	}
+}
+
+func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		maxBytes := s.config.MaxRequestBytes
+		if maxBytes <= 0 {
+			maxBytes = 32 << 20
+		}
+		if r.ContentLength > maxBytes {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request body exceeds the configured size limit", "invalid_request_error")
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		bodyWeight := r.ContentLength
+		if bodyWeight < 0 {
+			bodyWeight = maxBytes
+		}
+		if bodyWeight > int64(^uint64(0)>>1)/2 {
+			bodyWeight = s.maxInflightBodyBytes + 1
+		} else {
+			// Reserve twice the wire size for the body buffer and the JSON
+			// representation retained while routing/optimizing the request.
+			bodyWeight *= 2
+		}
+		releaseBody, bodyAcquired := s.tryAcquireBodyBytes(bodyWeight)
+		if !bodyAcquired {
+			s.inferenceRejections.Add(1)
+			s.bodyBudgetRejections.Add(1)
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-Fantom-Admission", "body-budget")
+			writeAPIError(w, http.StatusServiceUnavailable, "gateway request-body memory budget is temporarily exhausted", "service_unavailable")
+			return
+		}
+		defer releaseBody()
+		if s.inferenceSlots == nil {
+			next(w, r)
+			return
+		}
+		select {
+		case s.inferenceSlots <- struct{}{}:
+			s.inferenceAdmissions.Add(1)
+			defer func() { <-s.inferenceSlots }()
+			next(w, r)
+		default:
+			s.inferenceRejections.Add(1)
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-Fantom-Admission", "rejected")
+			writeAPIError(w, http.StatusServiceUnavailable, "gateway is at its configured concurrency limit; retry shortly", "service_unavailable")
+		}
+	}
+}
+
 func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter,r *http.Request) {
 		provided,ok:=bearerToken(r)
@@ -432,6 +591,40 @@ func (s *Server) authenticateAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleMetrics exposes a small Prometheus text endpoint. It is protected by
+// the administrator bearer key because provider labels and capacity settings
+// are operational metadata.
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_admissions_total Inference requests admitted by the gateway.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_admissions_total counter\nfantom_inference_admissions_total %d\n", s.inferenceAdmissions.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_rejections_total Inference requests rejected by admission control.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_rejections_total counter\nfantom_inference_rejections_total %d\n", s.inferenceRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_body_budget_rejections_total Requests rejected by the weighted body memory budget.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_body_budget_rejections_total counter\nfantom_body_budget_rejections_total %d\n", s.bodyBudgetRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_admissions_total Fantom-managed upstream calls admitted.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_admissions_total counter\nfantom_upstream_admissions_total %d\n", s.upstreamAdmissions.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_rejections_total Fantom-managed upstream calls rejected by the global limit.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_rejections_total counter\nfantom_upstream_rejections_total %d\n", s.upstreamRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_provider_limit_rejections_total Calls rejected by a per-provider concurrency limit.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_provider_limit_rejections_total counter\nfantom_provider_limit_rejections_total %d\n", s.providerRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_in_flight Currently admitted inference requests.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_in_flight gauge\nfantom_inference_in_flight %d\n", len(s.inferenceSlots))
+	_, _ = fmt.Fprintf(w, "fantom_inference_limit %d\n", cap(s.inferenceSlots))
+	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_in_flight Currently admitted Fantom-managed upstream calls.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_upstream_in_flight gauge\nfantom_upstream_in_flight %d\n", len(s.upstreamSlots))
+	_, _ = fmt.Fprintf(w, "fantom_upstream_limit %d\n", cap(s.upstreamSlots))
+	_, _ = fmt.Fprintf(w, "# HELP fantom_request_body_bytes_in_flight Request-body bytes reserved by active inference requests.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_request_body_bytes_in_flight gauge\nfantom_request_body_bytes_in_flight %d\n", s.inflightBodyBytes.Load())
+	_, _ = fmt.Fprintf(w, "fantom_request_body_bytes_limit %d\n", s.maxInflightBodyBytes)
+	s.providersMu.RLock()
+	for id, provider := range s.providers {
+		_, _ = fmt.Fprintf(w, "fantom_provider_in_flight{provider=%s} %d\n", strconv.Quote(id), len(provider.inflight))
+		_, _ = fmt.Fprintf(w, "fantom_provider_limit{provider=%s} %d\n", strconv.Quote(id), cap(provider.inflight))
+	}
+	s.providersMu.RUnlock()
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
@@ -455,7 +648,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	state:=s.store.snapshot()
+	state:=s.store.routingSnapshot()
 	items:=make([]modelItem,0)
 	seen:=make(map[string]struct{})
 	providerConfigs := s.providerMap(state)
@@ -605,7 +798,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state:=s.store.snapshot()
+	state:=s.store.routingSnapshot()
 	record.Model=input.Model
 	record.Streaming=string(payload["stream"])=="true"
 	providerMap:=s.providerMap(state)
@@ -695,6 +888,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var response *http.Response
+	var responseRelease func()
+	var providerSaturated bool
 	var lastErr error
 	var selectedProvider *providerRuntime
 	selectedUpstreamModel:=""
@@ -740,6 +935,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr=fmt.Errorf("all credentials for provider %q are cooling down",target.ProviderID)
 			continue
 		}
+		responseRelease = nil
 		for keyIndex,key:=range keyAttempts {
 			if provider.config.AuthType=="bearer"&&key=="" {
 				lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID)
@@ -757,21 +953,43 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.applyProviderHeaders(upstreamRequest,provider,key)
+			releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+			if !upstreamAcquired {
+				providerSaturated = true
+				lastErr = errors.New("gateway reached its upstream concurrency limit")
+				break
+			}
+			releaseProvider, acquired := provider.tryAcquire()
+			if !acquired {
+				releaseUpstream()
+				s.providerRejections.Add(1)
+				providerSaturated = true
+				lastErr = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
+				break
+			}
+			release := func() {
+				releaseProvider()
+				releaseUpstream()
+			}
 			attempts++
 			response,requestErr=provider.client.Do(upstreamRequest)
 			if requestErr!=nil {
+				release()
 				if r.Context().Err()!=nil { return }
 				lastErr=requestErr
 				s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
 				response=nil
 				break
 			}
+			responseRelease = release
 			if shouldRetryCredential(response.StatusCode) {
 				provider.cooldownCredential(key, response.StatusCode, response.Header.Get("Retry-After"))
 				if keyIndex<len(keyAttempts)-1 {
 					lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
 					credentialRetries++
 					_ = response.Body.Close()
+					release()
+					responseRelease = nil
 					response=nil
 					continue
 				}
@@ -782,6 +1000,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
 			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
 			_ = response.Body.Close()
+			if responseRelease != nil {
+				responseRelease()
+				responseRelease = nil
+			}
 			response=nil
 			continue
 		}
@@ -818,12 +1040,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if cooldownRetrySeconds > 0 {
 			status = http.StatusServiceUnavailable
 			w.Header().Set("Retry-After", strconv.Itoa(cooldownRetrySeconds))
+		} else if providerSaturated {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "1")
+			message = "all compatible providers are at their concurrency limit"
 		}
-		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
+		if lastErr!=nil && !providerSaturated { message="all route attempts failed: "+lastErr.Error() }
 		writeAPIError(w,status,message,"provider_error")
 		return
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+		if responseRelease != nil {
+			responseRelease()
+		}
+	}()
 	if selectedProvider!=nil {
 		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
 	}
@@ -913,27 +1144,44 @@ func (s *Server) applyProviderHeaders(req *http.Request, provider *providerRunti
 func (s *Server) streamBodyWithUsage(w http.ResponseWriter, body io.Reader, record *requestRecord, contentType string) {
 	controller := http.NewResponseController(w)
 	buffer := make([]byte, 32*1024)
-	const maxUsageCapture = 8 << 20
-	var captured bytes.Buffer
-	captureEnabled := true
+	isSSE := strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	var parser *sseUsageParser
+	if isSSE && record != nil {
+		parser = &sseUsageParser{record: record}
+	}
+	// Non-streaming JSON usage is captured only up to a strict per-request cap.
+	// SSE is parsed incrementally so response size does not determine memory use.
+	const maxJSONUsageCapture = 512 << 10
+	var captured []byte
+	captureJSON := !isSSE && record != nil
 	for {
 		n, readErr := body.Read(buffer)
 		if n > 0 {
-			if captureEnabled {
-				if captured.Len()+n <= maxUsageCapture {
-					_, _ = captured.Write(buffer[:n])
+			chunk := buffer[:n]
+			if parser != nil {
+				parser.feed(chunk)
+			} else if captureJSON {
+				if len(captured)+n <= maxJSONUsageCapture {
+					captured = append(captured, chunk...)
 				} else {
-					// Never let observability buffering grow with an unbounded model stream.
-					captureEnabled = false
-					captured.Reset()
+					captureJSON = false
+					captured = nil
 				}
 			}
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil { return }
+			if _, writeErr := w.Write(chunk); writeErr != nil {
+				return
+			}
 			_ = controller.Flush()
 		}
 		if readErr != nil {
-			if readErr != io.EOF { s.logger.Warn("error while streaming upstream response", "error", readErr) }
-			if captureEnabled && record != nil { captureProviderUsage(captured.Bytes(),contentType,record) }
+			if readErr != io.EOF {
+				s.logger.Warn("error while streaming upstream response", "error", readErr)
+			}
+			if parser != nil {
+				parser.finish()
+			} else if captureJSON && record != nil {
+				captureProviderUsage(captured, contentType, record)
+			}
 			return
 		}
 	}
@@ -947,37 +1195,113 @@ type usageValues struct {
 	OutputTokens     int64 `json:"output_tokens"`
 }
 
-func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
-	apply := func(values usageValues) {
-		if values.PromptTokens == 0 { values.PromptTokens = values.InputTokens }
-		if values.CompletionTokens == 0 { values.CompletionTokens = values.OutputTokens }
-		if values.PromptTokens > 0 { record.PromptTokens = values.PromptTokens }
-		if values.CompletionTokens > 0 { record.CompletionTokens = values.CompletionTokens }
-		if values.TotalTokens > 0 { record.TotalTokens = values.TotalTokens } else if record.PromptTokens+record.CompletionTokens > 0 {
-			record.TotalTokens = record.PromptTokens+record.CompletionTokens
-		}
-	}
-	if strings.Contains(strings.ToLower(contentType),"text/event-stream") {
-		scanner := bufio.NewScanner(bytes.NewReader(body))
-		scanner.Buffer(make([]byte, 64*1024), 1<<20)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if !strings.HasPrefix(line,"data:") { continue }
-			data := strings.TrimSpace(strings.TrimPrefix(line,"data:"))
-			if data == "" || data == "[DONE]" { continue }
-			var envelope struct {
-				Usage usageValues `json:"usage"`
-				Message struct { Usage usageValues `json:"usage"` } `json:"message"`
-			}
-			if json.Unmarshal([]byte(data),&envelope)==nil {
-				apply(envelope.Message.Usage)
-				apply(envelope.Usage)
-			}
-		}
+func applyProviderUsage(record *requestRecord, values usageValues) {
+	if record == nil {
 		return
 	}
-	var envelope struct { Usage usageValues `json:"usage"` }
-	if json.Unmarshal(body,&envelope)==nil { apply(envelope.Usage) }
+	if values.PromptTokens == 0 {
+		values.PromptTokens = values.InputTokens
+	}
+	if values.CompletionTokens == 0 {
+		values.CompletionTokens = values.OutputTokens
+	}
+	if values.PromptTokens > 0 {
+		record.PromptTokens = values.PromptTokens
+	}
+	if values.CompletionTokens > 0 {
+		record.CompletionTokens = values.CompletionTokens
+	}
+	if values.TotalTokens > 0 {
+		record.TotalTokens = values.TotalTokens
+	} else if record.PromptTokens+record.CompletionTokens > 0 {
+		record.TotalTokens = record.PromptTokens + record.CompletionTokens
+	}
+}
+
+func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		parser := &sseUsageParser{record: record}
+		parser.feed(body)
+		parser.finish()
+		return
+	}
+	var envelope struct {
+		Usage   usageValues `json:"usage"`
+		Message struct {
+			Usage usageValues `json:"usage"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return
+	}
+	applyProviderUsage(record, envelope.Message.Usage)
+	applyProviderUsage(record, envelope.Usage)
+}
+
+const maxSSEUsageLine = 256 << 10
+
+type sseUsageParser struct {
+	pending  []byte
+	dropping bool
+	record   *requestRecord
+}
+
+// feed parses usage from complete SSE data lines without retaining the response.
+// Oversized content lines are ignored for accounting but are still streamed to the client.
+func (p *sseUsageParser) feed(chunk []byte) {
+	for len(chunk) > 0 {
+		newline := bytes.IndexByte(chunk, '\n')
+		if newline < 0 {
+			p.append(chunk)
+			return
+		}
+		p.append(chunk[:newline])
+		p.flushLine()
+		chunk = chunk[newline+1:]
+	}
+}
+
+func (p *sseUsageParser) append(part []byte) {
+	if p.dropping || len(part) == 0 {
+		return
+	}
+	if len(p.pending)+len(part) > maxSSEUsageLine {
+		p.pending = p.pending[:0]
+		p.dropping = true
+		return
+	}
+	p.pending = append(p.pending, part...)
+}
+
+func (p *sseUsageParser) flushLine() {
+	if p.dropping {
+		p.dropping = false
+		p.pending = p.pending[:0]
+		return
+	}
+	line := bytes.TrimSpace(p.pending)
+	if bytes.HasPrefix(line, []byte("data:")) {
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
+			var envelope struct {
+				Usage usageValues `json:"usage"`
+				Message struct {
+					Usage usageValues `json:"usage"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(data, &envelope) == nil {
+				applyProviderUsage(p.record, envelope.Message.Usage)
+				applyProviderUsage(p.record, envelope.Usage)
+			}
+		}
+	}
+	p.pending = p.pending[:0]
+}
+
+func (p *sseUsageParser) finish() {
+	if p != nil && !p.dropping && len(p.pending) > 0 {
+		p.flushLine()
+	}
 }
 
 func copyResponseHeaders(dst, src http.Header) {

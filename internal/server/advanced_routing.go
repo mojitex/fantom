@@ -581,7 +581,7 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 	if timeout<=0 { timeout=8*time.Second }
 	ctx,cancel:=context.WithTimeout(parent,timeout)
 	defer cancel()
-	state:=s.store.snapshot()
+	state:=s.store.routingSnapshot()
 	criteria:=make([]map[string]any,0,len(candidates))
 	for _,candidate:=range candidates {
 		target,err:=resolveCandidate(candidate,state,providers)
@@ -602,16 +602,36 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 		req.Header.Set("Content-Type","application/json")
 		req.Header.Set("Accept","application/json")
 		s.applyProviderHeaders(req,decisionProvider,key)
+		releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+		if !upstreamAcquired {
+			continue
+		}
+		releaseProvider, acquired := decisionProvider.tryAcquire()
+		if !acquired {
+			releaseUpstream()
+			s.providerRejections.Add(1)
+			continue
+		}
+		release := func() {
+			releaseProvider()
+			releaseUpstream()
+		}
 		resp,err:=decisionProvider.client.Do(req)
-		if err!=nil { if ctx.Err()!=nil { return nil }; continue }
+		if err!=nil {
+			release()
+			if ctx.Err()!=nil { return nil }
+			continue
+		}
 		status:=resp.StatusCode
 		if shouldRetryCredential(status) {
 			decisionProvider.cooldownCredential(key,status,resp.Header.Get("Retry-After"))
 			resp.Body.Close()
+			release()
 			continue
 		}
 		rawResponse,_=io.ReadAll(io.LimitReader(resp.Body,1<<20))
 		resp.Body.Close()
+		release()
 		if status<200||status>=300 { return nil }
 		break
 	}
@@ -839,16 +859,39 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 		}
 		s.applyProviderHeaders(req,provider,key)
 		result.Attempts++
+		releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+		if !upstreamAcquired {
+			result.Err = errors.New("gateway reached its upstream concurrency limit")
+			continue
+		}
+		releaseProvider, acquired := provider.tryAcquire()
+		if !acquired {
+			releaseUpstream()
+			s.providerRejections.Add(1)
+			result.Err = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
+			continue
+		}
+		release := func() {
+			releaseProvider()
+			releaseUpstream()
+		}
 		resp,err:=provider.client.Do(req)
-		if err!=nil { result.Err=err; if ctx.Err()!=nil{return result}; continue }
+		if err!=nil {
+			release()
+			result.Err=err
+			if ctx.Err()!=nil{return result}
+			continue
+		}
 		result.Status=resp.StatusCode
 		if shouldRetryCredential(resp.StatusCode) {
 			provider.cooldownCredential(key,resp.StatusCode,resp.Header.Get("Retry-After"))
 			resp.Body.Close()
+			release()
 			continue
 		}
 		body,readErr:=io.ReadAll(io.LimitReader(resp.Body,8<<20))
 		resp.Body.Close()
+		release()
 		if readErr!=nil {result.Err=readErr;continue}
 		if resp.StatusCode<200||resp.StatusCode>=300 {result.Err=fmt.Errorf("model %s returned HTTP %d",model,resp.StatusCode);return result}
 		result.Text=extractChatText(body)
