@@ -593,10 +593,14 @@ func isMostlyNumbered(lines []string) bool {
 
 func compactReadNumbered(input string) string {
 	lines := strings.Split(input, "\n")
-	if len(lines) < rtkSmartMinLines {
+	if len(lines) < rtkSmartMinLines || len(lines) <= rtkSmartHeadLines+rtkSmartTailLines {
 		return input
 	}
-	return smartTruncate(input, rtkSmartHeadLines, rtkSmartTailLines)
+	cut := len(lines)-rtkSmartHeadLines-rtkSmartTailLines
+	out := append([]string{}, lines[:rtkSmartHeadLines]...)
+	out = append(out, fmt.Sprintf("... +%d lines truncated (file continues)", cut))
+	out = append(out, lines[len(lines)-rtkSmartTailLines:]...)
+	return strings.Join(out, "\n")
 }
 
 func smartTruncate(input string, headCount, tailCount int) string {
