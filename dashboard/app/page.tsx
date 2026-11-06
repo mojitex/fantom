@@ -353,8 +353,8 @@ function ModelCatalog({models,providers,onRefresh}:{models:Model[];providers:Pro
     {providers.map(provider=><option key={provider.id} value={provider.id}>{provider.id}</option>)}
    </select>
   </div>
-  <div className="table-scroll"><table><thead><tr><th>MODEL ID</th><th>PROVIDER</th><th>CLIENT MODEL NAME</th></tr></thead>
-   <tbody>{filtered.map(model=><tr key={model.id}><td><code className="model-code">{model.id}</code></td><td>{model.owned_by||"—"}</td><td><code>{model.id}</code></td></tr>)}</tbody>
+  <div className="table-scroll"><table><thead><tr><th>MODEL ID</th><th>PROVIDER</th><th>CAPABILITIES</th><th>CONTEXT / OUTPUT</th><th>CLIENT MODEL NAME</th></tr></thead>
+   <tbody>{filtered.map(model=>{const caps=Object.entries(model.capabilities||{}).filter(([key,value])=>value===true&&key!=="tools");const context=model.context_window||model.capabilities?.context_window;const output=model.max_output||model.capabilities?.max_output;return <tr key={model.id}><td><code className="model-code">{model.id}</code></td><td>{model.owned_by||"—"}</td><td>{caps.length?caps.map(([key])=><span className="stream-tag" key={key}>{key.replaceAll("_"," ")}</span>):"—"}{model.capabilities?.tools&&<span className="stream-tag">tools</span>}</td><td>{context?formatNumber(context):"—"} / {output?formatNumber(output):"—"}</td><td><code>{model.id}</code></td></tr>})}</tbody>
   </table>{filtered.length===0&&<div className="empty">{models.length===0?"No models are currently exposed. Test a provider and refresh the catalog.":"No models match this filter."}</div>}</div>
  </section>;
 }
