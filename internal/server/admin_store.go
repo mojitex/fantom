@@ -66,7 +66,11 @@ type requestRecord struct {
 	At               time.Time `json:"at"`
 	Provider         string    `json:"provider"`
 	Model            string    `json:"model"`
+	UpstreamModel    string    `json:"upstream_model,omitempty"`
 	Status           int       `json:"status"`
+	CostUSD          float64   `json:"cost_usd,omitempty"`
+	CostKnown        bool      `json:"cost_known,omitempty"`
+	RoutingStrategy  string    `json:"routing_strategy,omitempty"`
 	LatencyMS        int64     `json:"latency_ms"`
 	Streaming        bool      `json:"streaming"`
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
