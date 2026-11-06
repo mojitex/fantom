@@ -954,7 +954,10 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 	w.Header().Set("X-Fantom-Fusion-Panel-Successes",fmt.Sprint(len(successful)))
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
 	if string(payload["stream"])=="true" {
-		writeFusionSSE(w,comboName,finalText,totalPrompt,totalCompletion,totalTokens)
+		includeUsage:=false
+		var streamOptions struct { IncludeUsage bool `json:"include_usage"` }
+		if raw:=payload["stream_options"];len(raw)>0 { _=json.Unmarshal(raw,&streamOptions) }
+		writeFusionSSE(w,comboName,finalText,totalPrompt,totalCompletion,totalTokens,streamOptions.IncludeUsage)
 		return
 	}
 	writeFusionJSON(w,comboName,finalText,totalPrompt,totalCompletion,totalTokens)
@@ -969,21 +972,43 @@ func writeFusionJSON(w http.ResponseWriter, model,text string,prompt,completion,
 	})
 }
 
-func writeFusionSSE(w http.ResponseWriter,model,text string,prompt,completion,total int64) {
-	w.Header().Set("Content-Type","text/event-stream")
-	w.Header().Set("Cache-Control","no-cache")
-	w.Header().Set("Connection","keep-alive")
-	id:=fmt.Sprintf("chatcmpl-fusion-%d",time.Now().UnixNano())
-	created:=time.Now().Unix()
-	write:=func(value map[string]any) {
-		raw,_:=json.Marshal(value)
-		_,_=fmt.Fprintf(w,"data: %s\n\n",raw)
-		if flusher,ok:=w.(http.Flusher);ok {flusher.Flush()}
+func writeFusionSSE(w http.ResponseWriter, model, text string, prompt, completion, total int64, includeUsage bool) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	id := fmt.Sprintf("chatcmpl-fusion-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+	write := func(value map[string]any) {
+		raw, err := json.Marshal(value)
+		if err != nil { return }
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
+		if flusher, ok := w.(http.Flusher); ok { flusher.Flush() }
 	}
-	write(map[string]any{"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[]any{map[string]any{"index":0,"delta":map[string]any{"role":"assistant","content":text},"finish_reason":nil}}})
-	write(map[string]any{"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[]any{map[string]any{"index":0,"delta":map[string]any{},"finish_reason":"stop"}}})
-	_,_=fmt.Fprintf(w,"data: [DONE]\n\n")
-	if flusher,ok:=w.(http.Flusher);ok {flusher.Flush()}
+	chunk := func(delta map[string]any, finish any) map[string]any {
+		return map[string]any{
+			"id":id,"object":"chat.completion.chunk","created":created,"model":model,
+			"choices":[]any{map[string]any{"index":0,"delta":delta,"finish_reason":finish}},
+		}
+	}
+	write(chunk(map[string]any{"role":"assistant"},nil))
+	runes:=[]rune(text)
+	const chunkRunes=48
+	for offset:=0;offset<len(runes);offset+=chunkRunes {
+		end:=offset+chunkRunes
+		if end>len(runes) { end=len(runes) }
+		write(chunk(map[string]any{"content":string(runes[offset:end])},nil))
+	}
+	write(chunk(map[string]any{},"stop"))
+	if includeUsage {
+		write(map[string]any{
+			"id":id,"object":"chat.completion.chunk","created":created,"model":model,
+			"choices":[]any{},
+			"usage":map[string]any{"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":total},
+		})
+	}
+	_, _ = fmt.Fprint(w,"data: [DONE]\n\n")
+	if flusher,ok:=w.(http.Flusher);ok { flusher.Flush() }
 }
 
 func estimateRequestCost(provider config.Provider, model string, promptTokens, completionTokens int64) (float64,bool) {
