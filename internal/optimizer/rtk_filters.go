@@ -22,11 +22,20 @@ const (
 	rtkSmartTailLines   = 60
 	rtkSmartMinLines    = 250
 	rtkDedupMaxLines    = 2000
+	rtkGitLogMaxLines   = 200
+	rtkBuildWarnMax     = 5
+	rtkBuildDeprecationMax = 3
 )
 
 var (
 	rtkDiffHeaderRE = regexp.MustCompile("^diff --git ")
 	rtkDiffHunkRE   = regexp.MustCompile("^@@ ")
+	rtkGitCommitRE  = regexp.MustCompile("^(commit [0-9a-fA-F]{7,40}|[*|/\\\\ ]+commit [0-9a-fA-F]{7,40})$")
+	rtkGitOnelineRE = regexp.MustCompile("^([*|/\\\\ ]*[0-9a-fA-F]{7,40}\\\\s+.+)$")
+	rtkGitGraphRE   = regexp.MustCompile("^[*|/\\\\ ]+$")
+	rtkBuildCompileRE = regexp.MustCompile("(?i)^\\\\s*(Compiling|Downloading|Fetching)\\\\s+\\\\S+")
+	rtkBuildErrorRE = regexp.MustCompile("(?i)^(npm (ERR!|error)|yarn error|error(\\\\[|:)|ERROR:|\\\\[ERROR\\\\]|BUILD FAILED)")
+	rtkBuildWarnRE = regexp.MustCompile("(?i)^(npm warn|yarn warn|warning(\\\\[|:)|\\\\[WARNING\\\\])")
 	rtkStatusRE     = regexp.MustCompile("^(On branch |nothing to commit|Changes (not |to be )|Untracked files:)")
 	rtkPorcelainRE  = regexp.MustCompile("^[ MADRCU?!][ MADRCU?!] \\S")
 	rtkLSRowRE      = regexp.MustCompile("(?m)^[-dlbcps][rwx-]{9}")
@@ -55,6 +64,8 @@ func detectRTKFilter(text string) string {
 	case rtkStatusRE.MatchString(head) || mostlyGitPorcelain(head):
 		return "git-status"
 	}
+	if isGitLogOutput(head) { return "git-log" }
+	if isBuildOutput(head) { return "build-output" }
 	lines := strings.Split(head, "\n")
 	nonEmpty := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -109,6 +120,10 @@ func autoCompactRTK(text string) string {
 		return compactGitDiff(text)
 	case "git-status":
 		return compactGitStatus(text)
+	case "git-log":
+		return compactGitLog(text)
+	case "build-output":
+		return compactBuildOutput(text)
 	case "grep":
 		return compactGrep(text)
 	case "find":
@@ -166,6 +181,134 @@ func isPathLikeRTK(line string) bool {
 		return false
 	}
 	return strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.ContainsAny(value, "/\\")
+}
+
+
+func isGitLogOutput(text string) bool {
+	lines:=strings.Split(text,"\n")
+	nonEmpty:=[]string{}
+	for _,line:=range lines { if strings.TrimSpace(line)!="" {nonEmpty=append(nonEmpty,strings.TrimSpace(line))} }
+	if len(nonEmpty)<2 {return false}
+	return rtkGitCommitRE.MatchString(nonEmpty[0]) || rtkGitOnelineRE.MatchString(nonEmpty[0])
+}
+
+func isBuildOutput(text string) bool {
+	for _,line:=range strings.Split(text,"\n") {
+		trimmed:=strings.TrimSpace(line)
+		if rtkBuildErrorRE.MatchString(trimmed) || rtkBuildWarnRE.MatchString(trimmed) ||
+			strings.HasPrefix(strings.ToLower(trimmed),"build success") ||
+			strings.HasPrefix(strings.ToLower(trimmed),"successfully installed") ||
+			strings.HasPrefix(strings.ToLower(trimmed),"successfully built") ||
+			strings.HasPrefix(strings.ToLower(trimmed),"finished ") ||
+			strings.HasPrefix(strings.ToLower(trimmed),"added ") {
+			return true
+		}
+	}
+	return false
+}
+
+func compactGitLog(input string) string {
+	lines:=strings.Split(input,"\n")
+	out:=[]string{}
+	inCommit,subjectSeen:=false,false
+	skipped:=0
+	push:=func(line string){
+		if len(out)<rtkGitLogMaxLines {out=append(out,line)} else {skipped++}
+	}
+	for _,raw:=range lines {
+		line:=strings.TrimRight(raw,"\r")
+		trimmed:=strings.TrimSpace(line)
+		if trimmed=="" {continue}
+		if rtkGitCommitRE.MatchString(trimmed) {
+			inCommit=true
+			subjectSeen=false
+			push(line)
+			continue
+		}
+		if inCommit {
+			if regexp.MustCompile("^[*|/\\\\\\\\ ]*(Author|Date):").MatchString(trimmed) {
+				push(trimmed)
+				continue
+			}
+			if !subjectSeen && regexp.MustCompile("^[*|/\\\\\\\\ ]*    \\\\\\\\S").MatchString(line) {
+				push("  Subject: "+trimmed)
+				subjectSeen=true
+				continue
+			}
+			if regexp.MustCompile("^\\\\\\\\d+ files? changed").MatchString(trimmed) {
+				push("  "+trimmed)
+				continue
+			}
+			if strings.HasPrefix(trimmed,"diff --git ") {
+				push("  ... diff body omitted")
+				continue
+			}
+			continue
+		}
+		if match:=rtkGitOnelineRE.FindStringSubmatch(trimmed);len(match)==2 {
+			push(strings.TrimSpace(match[1]))
+			continue
+		}
+		if rtkGitGraphRE.MatchString(trimmed) {continue}
+		push(trimmed)
+	}
+	if skipped>0 {out=append(out,fmt.Sprintf("... (%d more lines)",skipped))}
+	result:=strings.Join(out,"\n")
+	if result=="" || len(result)>=len(input) {return input}
+	return result
+}
+
+func compactBuildOutput(input string) string {
+	lines:=strings.Split(input,"\n")
+	errors:=[]string{}
+	warnings:=[]string{}
+	deprecations:=[]string{}
+	summary:=[]string{}
+	compiling,downloading:=0,0
+	inError:=false
+	continuationRE:=regexp.MustCompile("^\\\\\\\\s*(-->|\\\\\\\\||[0-9]+\\\\\\\\s*\\\\\\\\||=)")
+	deprecationRE:=regexp.MustCompile("(?i)^npm warn deprecated")
+	for _,line:=range lines {
+		trimmed:=strings.TrimSpace(line)
+		if inError {
+			if trimmed=="" {inError=false;continue}
+			if continuationRE.MatchString(line) {errors=append(errors,line);continue}
+			inError=false
+		}
+		if trimmed=="" {continue}
+		if deprecationRE.MatchString(trimmed) {deprecations=append(deprecations,line);continue}
+		if rtkBuildErrorRE.MatchString(trimmed) {
+			errors=append(errors,line)
+			if strings.HasPrefix(strings.ToLower(trimmed),"error") || strings.HasPrefix(strings.ToLower(trimmed),"warning") {inError=true}
+			continue
+		}
+		if rtkBuildWarnRE.MatchString(trimmed) {warnings=append(warnings,line);continue}
+		if rtkBuildCompileRE.MatchString(trimmed) {
+			if strings.Contains(strings.ToLower(trimmed),"compiling") {compiling++} else {downloading++}
+			continue
+		}
+		lower:=strings.ToLower(trimmed)
+		if strings.HasPrefix(lower,"added ") || strings.HasPrefix(lower,"removed ") ||
+			strings.HasPrefix(lower,"changed ") || strings.HasPrefix(lower,"audited ") ||
+			strings.HasPrefix(lower,"installed ") || strings.HasPrefix(lower,"finished ") ||
+			strings.HasPrefix(lower,"build success") || strings.HasPrefix(lower,"successfully installed") ||
+			strings.HasPrefix(lower,"successfully built") || strings.Contains(lower,"packages are looking for funding") ||
+			strings.HasPrefix(lower,"to address ") || strings.HasPrefix(lower,"run npm audit") {
+			summary=append(summary,line)
+		}
+	}
+	out:=[]string{}
+	for _,line:=range deprecations[:minRTK(len(deprecations),rtkBuildDeprecationMax)] {out=append(out,line)}
+	if len(deprecations)>rtkBuildDeprecationMax {out=append(out,fmt.Sprintf("... +%d more deprecated packages",len(deprecations)-rtkBuildDeprecationMax))}
+	if compiling>0 {out=append(out,fmt.Sprintf("Compiled %d packages",compiling))}
+	if downloading>0 {out=append(out,fmt.Sprintf("Downloaded %d packages",downloading))}
+	out=append(out,errors...)
+	for _,line:=range warnings[:minRTK(len(warnings),rtkBuildWarnMax)] {out=append(out,line)}
+	if len(warnings)>rtkBuildWarnMax {out=append(out,fmt.Sprintf("... +%d more warnings",len(warnings)-rtkBuildWarnMax))}
+	out=append(out,summary...)
+	result:=strings.TrimSpace(strings.Join(out,"\n"))
+	if result=="" || len(result)>=len(input) {return input}
+	return result
 }
 
 func compactGitDiff(input string) string {
