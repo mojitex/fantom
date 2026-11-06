@@ -439,22 +439,26 @@ func (d *adminStore) appendProviderFromInput(in providerInput, existing *config.
 	models:=in.Models; if len(models)==0 { models=[]string{"*"} }
 	for i:=range models { models[i]=strings.TrimSpace(models[i]) }
 	timeout:=in.TimeoutSeconds; if timeout<=0 { timeout=100 }; if timeout>600 { return config.Provider{},errors.New("timeout cannot exceed 600 seconds") }
-for model, caps := range in.ModelCapabilities {
+	cleanCapabilities := make(map[string]config.ModelCapabilities, len(in.ModelCapabilities))
+	for model, caps := range in.ModelCapabilities {
 		model = strings.TrimSpace(model)
 		if model == "" { return config.Provider{}, errors.New("model capability key cannot be empty") }
 		if caps.ContextWindow < 0 || caps.ContextWindow > 10000000 || caps.MaxOutput < 0 || caps.MaxOutput > 1000000 {
 			return config.Provider{}, fmt.Errorf("model %q has invalid context/output limits", model)
 		}
-		in.ModelCapabilities[model] = caps
+		cleanCapabilities[model] = caps
 	}
+	in.ModelCapabilities = cleanCapabilities
+	cleanPricing := make(map[string]config.ModelPricing, len(in.ModelPricing))
 	for model, pricing := range in.ModelPricing {
 		model = strings.TrimSpace(model)
 		if model == "" { return config.Provider{}, errors.New("model pricing key cannot be empty") }
 		if pricing.InputPerMillionUSD < 0 || pricing.OutputPerMillionUSD < 0 || pricing.InputPerMillionUSD > 1000000 || pricing.OutputPerMillionUSD > 1000000 {
 			return config.Provider{}, fmt.Errorf("model %q has invalid pricing; rates must be between 0 and 1000000 USD per million tokens", model)
 		}
-		in.ModelPricing[model] = pricing
+		cleanPricing[model] = pricing
 	}
+	in.ModelPricing = cleanPricing
 	p:=config.Provider{ID:id,BaseURL:base,ChatPath:chatPath,ModelsURL:strings.TrimSpace(in.ModelsURL),AuthType:auth,Models:models,TimeoutSeconds:timeout,ModelCapabilities:cloneModelCapabilities(in.ModelCapabilities),ModelPricing:cloneModelPricing(in.ModelPricing)}
 	if existing!=nil {
 		if in.APIKey=="" && len(in.APIKeys)==0 { p.APIKeys=append([]string(nil),existing.APIKeys...) }
