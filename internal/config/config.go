@@ -70,8 +70,13 @@ type Config struct {
 	GatewayAPIKeys     []string         `json:"-"`
 	StaticDirectory    string           `json:"-"`
 	MaxRequestBytes    int64            `json:"-"`
-	DefaultTokenSaver  string           `json:"-"`
-	DefaultCodeMode    string           `json:"-"`
+	DefaultTokenSaver             string `json:"-"`
+	DefaultCodeMode               string `json:"-"`
+	DefaultCavemanMode            string `json:"-"`
+	HeadroomEnabled               bool   `json:"-"`
+	HeadroomURL                   string `json:"-"`
+	HeadroomTimeoutSeconds        int    `json:"-"`
+	HeadroomCompressUserMessages  bool   `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -107,6 +112,23 @@ func Load() (*Config, error) {
 	cfg.DefaultCodeMode = strings.ToLower(envOr("FANTOM_CODE_MODE", "off"))
 	if cfg.DefaultCodeMode != "lite" && cfg.DefaultCodeMode != "full" && cfg.DefaultCodeMode != "ultra" {
 		cfg.DefaultCodeMode = "off"
+	}
+	cfg.DefaultCavemanMode = strings.ToLower(envOr("FANTOM_CAVEMAN_MODE", "off"))
+	if cfg.DefaultCavemanMode != "lite" && cfg.DefaultCavemanMode != "full" && cfg.DefaultCavemanMode != "ultra" {
+		cfg.DefaultCavemanMode = "off"
+	}
+	cfg.HeadroomEnabled = envBool("FANTOM_HEADROOM_ENABLED", false)
+	cfg.HeadroomURL = strings.TrimSpace(os.Getenv("FANTOM_HEADROOM_URL"))
+	cfg.HeadroomTimeoutSeconds = ParsePositiveIntEnv("FANTOM_HEADROOM_TIMEOUT_SECONDS", 3)
+	if cfg.HeadroomTimeoutSeconds > 30 {
+		return nil, errors.New("FANTOM_HEADROOM_TIMEOUT_SECONDS cannot exceed 30")
+	}
+	cfg.HeadroomCompressUserMessages = envBool("FANTOM_HEADROOM_COMPRESS_USER_MESSAGES", false)
+	if cfg.HeadroomEnabled {
+		headroomURL, err := url.ParseRequestURI(cfg.HeadroomURL)
+		if err != nil || headroomURL.Host == "" || (headroomURL.Scheme != "https" && headroomURL.Scheme != "http") || headroomURL.User != nil {
+			return nil, errors.New("FANTOM_HEADROOM_URL must be an http or https URL without embedded credentials when Headroom is enabled")
+		}
 	}
 	if len(cfg.Providers) == 0 {
 		return nil, errors.New("at least one provider must be configured")
@@ -194,6 +216,14 @@ func splitCSV(value string) []string {
 		}
 	}
 	return result
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" { return fallback }
+	parsed, err := strconv.ParseBool(value)
+	if err != nil { return fallback }
+	return parsed
 }
 
 func envOr(key, fallback string) string {
