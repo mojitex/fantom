@@ -45,6 +45,7 @@ func main() {
 	httpServer := &http.Server{
 		Addr: cfg.ListenAddr, Handler: handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 120 * time.Second,
 		IdleTimeout: 120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 		// WriteTimeout is intentionally disabled: model streams can be long-lived.
