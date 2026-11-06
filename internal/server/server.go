@@ -164,6 +164,7 @@ type Server struct {
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
 	inferenceSlots  chan struct{}
+	upstreamSlots   chan struct{}
 }
 
 type modelItem struct {
@@ -204,9 +205,14 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 256
 	}
+	maxConcurrentUpstream := cfg.MaxConcurrentUpstreamRequests
+	if maxConcurrentUpstream <= 0 {
+		maxConcurrentUpstream = 512
+	}
 	s := &Server{
 		config: cfg, providers: make(map[string]*providerRuntime), store: store, logger: logger,
 		inferenceSlots: make(chan struct{}, maxConcurrent),
+		upstreamSlots: make(chan struct{}, maxConcurrentUpstream),
 	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
@@ -452,6 +458,20 @@ func (s *Server) environmentKeyValid(provided string) bool {
 
 // limitInference applies fail-fast admission control to model execution paths.
 // A bounded in-flight count protects memory, goroutines and upstream quotas during bursts.
+// tryAcquireUpstream bounds total in-flight Fantom-managed upstream calls,
+// including fan-out from Fusion and Smart routing. Saturated calls fail fast.
+func (s *Server) tryAcquireUpstream() (func(), bool) {
+	if s == nil || s.upstreamSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.upstreamSlots <- struct{}{}:
+		return func() { <-s.upstreamSlots }, true
+	default:
+		return nil, false
+	}
+}
+
 func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		maxBytes := s.config.MaxRequestBytes
@@ -835,11 +855,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.applyProviderHeaders(upstreamRequest,provider,key)
-			release, acquired := provider.tryAcquire()
+			releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+			if !upstreamAcquired {
+				providerSaturated = true
+				lastErr = errors.New("gateway reached its upstream concurrency limit")
+				break
+			}
+			releaseProvider, acquired := provider.tryAcquire()
 			if !acquired {
+				releaseUpstream()
 				providerSaturated = true
 				lastErr = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
 				break
+			}
+			release := func() {
+				releaseProvider()
+				releaseUpstream()
 			}
 			attempts++
 			response,requestErr=provider.client.Do(upstreamRequest)
