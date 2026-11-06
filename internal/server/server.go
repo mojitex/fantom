@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -1004,27 +1003,44 @@ func (s *Server) applyProviderHeaders(req *http.Request, provider *providerRunti
 func (s *Server) streamBodyWithUsage(w http.ResponseWriter, body io.Reader, record *requestRecord, contentType string) {
 	controller := http.NewResponseController(w)
 	buffer := make([]byte, 32*1024)
-	const maxUsageCapture = 8 << 20
-	var captured bytes.Buffer
-	captureEnabled := true
+	isSSE := strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	var parser *sseUsageParser
+	if isSSE && record != nil {
+		parser = &sseUsageParser{record: record}
+	}
+	// Non-streaming JSON usage is captured only up to a strict per-request cap.
+	// SSE is parsed incrementally so response size does not determine memory use.
+	const maxJSONUsageCapture = 512 << 10
+	var captured []byte
+	captureJSON := !isSSE && record != nil
 	for {
 		n, readErr := body.Read(buffer)
 		if n > 0 {
-			if captureEnabled {
-				if captured.Len()+n <= maxUsageCapture {
-					_, _ = captured.Write(buffer[:n])
+			chunk := buffer[:n]
+			if parser != nil {
+				parser.feed(chunk)
+			} else if captureJSON {
+				if len(captured)+n <= maxJSONUsageCapture {
+					captured = append(captured, chunk...)
 				} else {
-					// Never let observability buffering grow with an unbounded model stream.
-					captureEnabled = false
-					captured.Reset()
+					captureJSON = false
+					captured = nil
 				}
 			}
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil { return }
+			if _, writeErr := w.Write(chunk); writeErr != nil {
+				return
+			}
 			_ = controller.Flush()
 		}
 		if readErr != nil {
-			if readErr != io.EOF { s.logger.Warn("error while streaming upstream response", "error", readErr) }
-			if captureEnabled && record != nil { captureProviderUsage(captured.Bytes(),contentType,record) }
+			if readErr != io.EOF {
+				s.logger.Warn("error while streaming upstream response", "error", readErr)
+			}
+			if parser != nil {
+				parser.finish()
+			} else if captureJSON && record != nil {
+				captureProviderUsage(captured, contentType, record)
+			}
 			return
 		}
 	}
@@ -1038,37 +1054,107 @@ type usageValues struct {
 	OutputTokens     int64 `json:"output_tokens"`
 }
 
-func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
-	apply := func(values usageValues) {
-		if values.PromptTokens == 0 { values.PromptTokens = values.InputTokens }
-		if values.CompletionTokens == 0 { values.CompletionTokens = values.OutputTokens }
-		if values.PromptTokens > 0 { record.PromptTokens = values.PromptTokens }
-		if values.CompletionTokens > 0 { record.CompletionTokens = values.CompletionTokens }
-		if values.TotalTokens > 0 { record.TotalTokens = values.TotalTokens } else if record.PromptTokens+record.CompletionTokens > 0 {
-			record.TotalTokens = record.PromptTokens+record.CompletionTokens
-		}
-	}
-	if strings.Contains(strings.ToLower(contentType),"text/event-stream") {
-		scanner := bufio.NewScanner(bytes.NewReader(body))
-		scanner.Buffer(make([]byte, 64*1024), 1<<20)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if !strings.HasPrefix(line,"data:") { continue }
-			data := strings.TrimSpace(strings.TrimPrefix(line,"data:"))
-			if data == "" || data == "[DONE]" { continue }
-			var envelope struct {
-				Usage usageValues `json:"usage"`
-				Message struct { Usage usageValues `json:"usage"` } `json:"message"`
-			}
-			if json.Unmarshal([]byte(data),&envelope)==nil {
-				apply(envelope.Message.Usage)
-				apply(envelope.Usage)
-			}
-		}
+func applyProviderUsage(record *requestRecord, values usageValues) {
+	if record == nil {
 		return
 	}
-	var envelope struct { Usage usageValues `json:"usage"` }
-	if json.Unmarshal(body,&envelope)==nil { apply(envelope.Usage) }
+	if values.PromptTokens == 0 {
+		values.PromptTokens = values.InputTokens
+	}
+	if values.CompletionTokens == 0 {
+		values.CompletionTokens = values.OutputTokens
+	}
+	if values.PromptTokens > 0 {
+		record.PromptTokens = values.PromptTokens
+	}
+	if values.CompletionTokens > 0 {
+		record.CompletionTokens = values.CompletionTokens
+	}
+	if values.TotalTokens > 0 {
+		record.TotalTokens = values.TotalTokens
+	} else if record.PromptTokens+record.CompletionTokens > 0 {
+		record.TotalTokens = record.PromptTokens + record.CompletionTokens
+	}
+}
+
+func captureProviderUsage(body []byte, contentType string, record *requestRecord) {
+	var envelope struct {
+		Usage   usageValues `json:"usage"`
+		Message struct {
+			Usage usageValues `json:"usage"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return
+	}
+	applyProviderUsage(record, envelope.Message.Usage)
+	applyProviderUsage(record, envelope.Usage)
+}
+
+const maxSSEUsageLine = 256 << 10
+
+type sseUsageParser struct {
+	pending  []byte
+	dropping bool
+	record   *requestRecord
+}
+
+// feed parses usage from complete SSE data lines without retaining the response.
+// Oversized content lines are ignored for accounting but are still streamed to the client.
+func (p *sseUsageParser) feed(chunk []byte) {
+	for len(chunk) > 0 {
+		newline := bytes.IndexByte(chunk, '\n')
+		if newline < 0 {
+			p.append(chunk)
+			return
+		}
+		p.append(chunk[:newline])
+		p.flushLine()
+		chunk = chunk[newline+1:]
+	}
+}
+
+func (p *sseUsageParser) append(part []byte) {
+	if p.dropping || len(part) == 0 {
+		return
+	}
+	if len(p.pending)+len(part) > maxSSEUsageLine {
+		p.pending = p.pending[:0]
+		p.dropping = true
+		return
+	}
+	p.pending = append(p.pending, part...)
+}
+
+func (p *sseUsageParser) flushLine() {
+	if p.dropping {
+		p.dropping = false
+		p.pending = p.pending[:0]
+		return
+	}
+	line := bytes.TrimSpace(p.pending)
+	if bytes.HasPrefix(line, []byte("data:")) {
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
+			var envelope struct {
+				Usage usageValues `json:"usage"`
+				Message struct {
+					Usage usageValues `json:"usage"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(data, &envelope) == nil {
+				applyProviderUsage(p.record, envelope.Message.Usage)
+				applyProviderUsage(p.record, envelope.Usage)
+			}
+		}
+	}
+	p.pending = p.pending[:0]
+}
+
+func (p *sseUsageParser) finish() {
+	if p != nil && !p.dropping && len(p.pending) > 0 {
+		p.flushLine()
+	}
 }
 
 func copyResponseHeaders(dst, src http.Header) {
