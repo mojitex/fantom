@@ -65,7 +65,7 @@ type requestRecord struct {
 	Account           string    `json:"account,omitempty"`
 	TTFTMS            int64     `json:"ttft_ms,omitempty"`
 	Endpoint          string    `json:"endpoint,omitempty"`
-	Source            string    `json:"source,omitempty"
+	Source            string    `json:"source,omitempty"`
 }
 
 type adminState struct {
