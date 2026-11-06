@@ -252,7 +252,7 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		}
 
 		if strategy == "fusion" {
-			if len(route.FusionModels) == 0 { route.FusionModels = append([]string{alias}, route.FallbackModels...) }
+			if len(route.FusionModels) == 0 { route.FusionModels = append([]string(nil), route.FallbackModels...) }
 			if len(route.FusionModels) < 2 || len(route.FusionModels) > 8 {
 				return fmt.Errorf("route %q fusion requires between 2 and 8 panel models", alias)
 			}
