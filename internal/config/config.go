@@ -108,7 +108,11 @@ func Load() (*Config, error) {
 		return nil, errors.New("set GATEWAY_API_KEY or GATEWAY_API_KEYS; the gateway refuses to start without client authentication")
 	}
 	cfg.StaticDirectory = envOr("STATIC_DIR", "./dashboard/out")
-	cfg.MaxRequestBytes = int64(ParsePositiveIntEnv("MAX_REQUEST_MB", 32)) << 20
+	maxRequestMB := ParsePositiveIntEnv("MAX_REQUEST_MB", 32)
+	if maxRequestMB > 8192 {
+		return nil, errors.New("MAX_REQUEST_MB cannot exceed 8192")
+	}
+	cfg.MaxRequestBytes = int64(maxRequestMB) << 20
 	cfg.MaxInflightBodyBytes = int64(ParsePositiveIntEnv("FANTOM_MAX_INFLIGHT_BODY_MB", 256)) << 20
 	if cfg.MaxInflightBodyBytes > 8192<<20 {
 		return nil, errors.New("FANTOM_MAX_INFLIGHT_BODY_MB cannot exceed 8192")
