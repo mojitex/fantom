@@ -450,14 +450,21 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	state:=s.store.snapshot()
 	items:=make([]modelItem,0)
 	seen:=make(map[string]struct{})
+	providerConfigs := s.providerMap(state)
 	for _,saved:=range state.Providers {
 		runtime:=s.providerByID(saved.ID)
 		if runtime==nil { continue }
 		for _,model:=range s.providerModels(r.Context(),runtime) {
-			appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID})
+			caps := modelCapabilities(runtime.config, model, model)
+			appendModel(&items,seen,modelItem{ID:model,Object:"model",OwnedBy:runtime.config.ID,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
 		}
 	}
-	for alias,route:=range state.Routes { if s.providerByID(route.Provider)!=nil { appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider}) } }
+	for alias,route:=range state.Routes {
+		if runtime:=s.providerByID(route.Provider); runtime!=nil {
+			caps := s.candidateCapabilities(alias, state, providerConfigs)
+			appendModel(&items,seen,modelItem{ID:alias,Object:"model",OwnedBy:route.Provider,Capabilities:caps,ContextWindow:caps.ContextWindow,MaxOutput:caps.MaxOutput})
+		}
+	}
 	if s.core != nil {
 		coreModels, err := s.core.Models(r.Context())
 		if err != nil {
