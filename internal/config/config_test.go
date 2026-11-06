@@ -25,6 +25,7 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "oc_sk_test")
 	t.Setenv("FANTOM_TOKEN_SAVER", "safe")
 	t.Setenv("FANTOM_CODE_MODE", "off")
+	t.Setenv("MAX_REQUEST_MB", "32")
 	t.Setenv("FANTOM_MAX_CONCURRENT_REQUESTS", "")
 	t.Setenv("FANTOM_MAX_INFLIGHT_BODY_MB", "")
 	t.Setenv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", "")
