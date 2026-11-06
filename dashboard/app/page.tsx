@@ -527,8 +527,42 @@ function Routing({
   </section>
  </div>;
 }
-function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){const max=Math.max(1,...Object.values(usage.by_model||{}));return <><div className="metrics-grid three"><Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/><Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/><Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/></div><div className="metrics-grid three usage-token-metrics"><Metric label="PROMPT TOKENS" value={formatNumber(usage.total_prompt_tokens||0)} detail="Reported by providers" glyph="terminal" tone="blue"/><Metric label="COMPLETION TOKENS" value={formatNumber(usage.total_completion_tokens||0)} detail="Reported by providers" glyph="terminal" tone="violet"/><Metric label="TOTAL TOKENS" value={formatNumber(usage.total_tokens||0)} detail="No estimates included" glyph="chart" tone="green"/></div><div className="content-grid"><section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>{Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}{Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}</section><section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div><div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div><p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p><div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div><div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div></section></div><section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section><details className="inline-tool-details request-explorer"><summary>Open full request explorer <span>{requests.length} retained requests</span></summary><LogsPage requests={requests}/></details></>}
-
+function UsagePage({usage,requests}:{usage:Usage;requests:Log[]}){
+ const max=Math.max(1,...Object.values(usage.by_model||{}));
+ const priced=usage.priced_requests||0;
+ const coverage=usage.cost_coverage_percent||0;
+ const cost=priced>0?new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:4}).format(usage.total_estimated_cost_usd||0):"—";
+ return <>
+  <div className="metrics-grid three">
+   <Metric label="TOTAL REQUESTS" value={formatNumber(usage.total_requests)} detail="Requests recorded" glyph="chart" tone="violet"/>
+   <Metric label="SUCCESS RATE" value={usage.total_requests?((usage.successful_requests/usage.total_requests)*100).toFixed(1)+"%":"—"} detail={formatNumber(usage.successful_requests)+" successful"} glyph="check" tone="green"/>
+   <Metric label="FAILED REQUESTS" value={formatNumber(usage.failed_requests)} detail="Non-2xx responses" glyph="alert" tone="amber"/>
+  </div>
+  <div className="metrics-grid three usage-token-metrics">
+   <Metric label="PROMPT TOKENS" value={formatNumber(usage.total_prompt_tokens||0)} detail="Reported by providers" glyph="terminal" tone="blue"/>
+   <Metric label="COMPLETION TOKENS" value={formatNumber(usage.total_completion_tokens||0)} detail="Reported by providers" glyph="terminal" tone="violet"/>
+   <Metric label="TOTAL TOKENS" value={formatNumber(usage.total_tokens||0)} detail="No estimates included" glyph="chart" tone="green"/>
+  </div>
+  <div className="metrics-grid two">
+   <Metric label="ESTIMATED COST" value={cost} detail={priced?priced+" requests priced from configured model rates":"No model pricing configured"} glyph="chart" tone="violet"/>
+   <Metric label="PRICING COVERAGE" value={priced?coverage.toFixed(1)+"%":"—"} detail={priced?formatNumber(usage.unpriced_requests||0)+" requests have no configured price":"Configure per-model rates in Providers"} glyph="check" tone="green"/>
+  </div>
+  <div className="content-grid">
+   <section className="panel"><div className="panel-heading"><div><div className="eyebrow">MODEL DISTRIBUTION</div><h3>Requests by model</h3></div></div>
+    {Object.entries(usage.by_model||{}).sort((a,b)=>b[1]-a[1]).slice(0,12).map(([name,count])=><div className="traffic-item" key={name}><div><span className="mono">{name}</span><b>{count}</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:(count/max*100)+"%"}}/></div></div>)}
+    {Object.keys(usage.by_model||{}).length===0&&<div className="empty">Model metrics will appear after traffic begins.</div>}
+   </section>
+   <section className="panel"><div className="panel-heading"><div><div className="eyebrow">PERFORMANCE</div><h3>Gateway latency</h3></div></div>
+    <div className="latency-number">{usage.avg_latency_ms?formatNumber(usage.avg_latency_ms):"—"}<small>ms average</small></div>
+    <p className="muted-copy">Average time from request arrival until the upstream response stream completes. This is gateway-observed latency, not provider-reported inference time.</p>
+    <div className="info-row"><span>Measured requests</span><b>{formatNumber(usage.total_requests)}</b></div>
+    <div className="info-row"><span>Streaming requests</span><b>{requests.filter(r=>r.streaming).length}</b></div>
+   </section>
+  </div>
+  <section className="panel recent-panel"><div className="panel-heading"><div><div className="eyebrow">REQUEST DETAIL</div><h3>Latest activity</h3></div></div><RequestTable rows={requests.slice(0,20)}/></section>
+  <details className="inline-tool-details request-explorer"><summary>Open full request explorer <span>{requests.length} retained requests</span></summary><LogsPage requests={requests}/></details>
+ </>;
+}
 function LogsPage({requests}:{requests:Log[]}) {
  const [query,setQuery]=useState("");
  const [status,setStatus]=useState("all");
@@ -555,4 +589,4 @@ function LogsPage({requests}:{requests:Log[]}) {
   {filtered.length===0&&<div className="empty">{requests.length===0?"No requests have passed through this gateway yet.":"No requests match these filters."}</div>}
  </section>;
 }
-function RequestTable({rows}:{rows:Log[]}){return <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>MODEL</th><th>PROVIDER</th><th>RUNTIME / ACCOUNT</th><th>STATUS</th><th>LATENCY</th><th>TOKENS</th><th>RETRIES</th><th>WHEN</th></tr></thead><tbody>{rows.map(r=><tr key={r.id+"-"+r.at}><td><code className="request-id">{(r.id||"—").slice(0,12)}</code></td><td><code className="model-code">{r.model||"—"}</code>{r.streaming&&<span className="stream-tag">SSE</span>}</td><td>{r.provider||"—"}</td><td title={r.endpoint||r.source||""}><span>{r.engine==="cliproxy"?"Go runtime":"Gateway"}</span>{r.account&&<small className="account-subline">{r.account}</small>}{r.ttft_ms!==undefined&&<small className="account-subline">TTFT {r.ttft_ms} ms</small>}</td><td><span className={cls("status-code",r.status>=200&&r.status<400?"good":"bad")}>{r.status||"—"}</span></td><td>{r.latency_ms} ms</td><td>{r.total_tokens?formatNumber(r.total_tokens):"—"}</td><td><span title={(r.upstream_attempts||0)+" upstream attempts"}>{r.credential_retries||0} key · {r.fallback_attempts||0} fallback</span></td><td>{ago(r.at)}</td></tr>)}</tbody></table></div>}
+function RequestTable({rows}:{rows:Log[]}){return <div className="table-scroll"><table><thead><tr><th>REQUEST</th><th>MODEL</th><th>PROVIDER</th><th>RUNTIME / ACCOUNT</th><th>STATUS</th><th>LATENCY</th><th>TOKENS</th><th>COST</th><th>RETRIES</th><th>WHEN</th></tr></thead><tbody>{rows.map(r=><tr key={r.id+"-"+r.at}><td><code className="request-id">{(r.id||"—").slice(0,12)}</code></td><td><code className="model-code">{r.model||"—"}</code>{r.streaming&&<span className="stream-tag">SSE</span>}{r.upstream_model&&r.upstream_model!==r.model&&<small className="account-subline">{r.upstream_model}</small>}{r.routing_strategy&&<small className="account-subline">{r.routing_strategy}</small>}</td><td>{r.provider||"—"}</td><td title={r.endpoint||r.source||""}><span>{r.engine==="cliproxy"?"Go runtime":r.engine==="fusion"?"Fusion":"Gateway"}</span>{r.account&&<small className="account-subline">{r.account}</small>}{r.ttft_ms!==undefined&&<small className="account-subline">TTFT {r.ttft_ms} ms</small>}</td><td><span className={cls("status-code",r.status>=200&&r.status<400?"good":"bad")}>{r.status||"—"}</span></td><td>{r.latency_ms} ms</td><td>{r.total_tokens?formatNumber(r.total_tokens):"—"}</td><td>{r.cost_known?new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:5}).format(r.cost_usd||0):"—"}</td><td><span title={(r.upstream_attempts||0)+" upstream attempts"}>{r.credential_retries||0} key · {r.fallback_attempts||0} fallback</span></td><td>{ago(r.at)}</td></tr>)}</tbody></table></div>}
