@@ -625,7 +625,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	candidates=s.reorderByCapabilities(candidates,required,state,providerMap)
 	if comboStrategy=="smart" && hasCombo {
 		var used bool
-		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap)
+		candidates,used=s.smartOrderCandidates(r.Context(),r,payload,input.Model,primaryRoute,candidates,state,providerMap,&record)
 		if used { w.Header().Set("X-Fantom-Smart-Selected",candidates[0]) }
 	}
 	if comboStrategy == "round-robin" && len(candidates) > 1 {
@@ -760,6 +760,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if response==nil {
 		if comboStrategy == "smart" {
 			s.clearSmartSession(r,payload,input.Model)
+			mergeSmartDecisionUsage(&record)
 		}
 		message:="no configured route could serve this model"
 		status:=http.StatusBadGateway
@@ -783,6 +784,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			record.CostUSD=cost
 			record.CostKnown=true
 		}
+	}
+	if comboStrategy=="smart" {
+		mergeSmartDecisionUsage(&record)
 	}
 	if response.StatusCode>=500 {
 		providerID:="unknown"; if selectedProvider!=nil { providerID=selectedProvider.config.ID }
