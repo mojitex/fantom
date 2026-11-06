@@ -220,6 +220,41 @@ func (s *Server) candidateCapabilities(candidate string, state adminState, provi
 	return config.ModelCapabilities{}
 }
 
+func splitHardCompatibleCandidates(candidates []string, required requiredCapabilitySet, state adminState, providers map[string]config.Provider) ([]string, []string) {
+	hard := []string{"vision", "pdf", "audio_input", "video_input"}
+	hasRequirement := false
+	for _, key := range hard {
+		if required[key] { hasRequirement = true; break }
+	}
+	if !hasRequirement { return append([]string(nil), candidates...), nil }
+	compatible := make([]string, 0, len(candidates))
+	deferred := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		caps := s.candidateCapabilities(candidate, state, providers)
+		satisfied := true
+		for _, key := range hard {
+			if required[key] && !capabilityValue(caps, key) { satisfied = false; break }
+		}
+		if satisfied { compatible = append(compatible, candidate) } else { deferred = append(deferred, candidate) }
+	}
+	if len(compatible) == 0 {
+		// No capability-compatible candidate is known. Preserve the configured
+		// route order rather than making an unsupported zero-candidate decision.
+		return append([]string(nil), candidates...), nil
+	}
+	return compatible, deferred
+}
+
+func rotateCandidatesWithinPrefix(candidates []string, offset, eligibleCount int) []string {
+	if len(candidates) < 2 || eligibleCount < 2 { return candidates }
+	if eligibleCount > len(candidates) { eligibleCount = len(candidates) }
+	rotated := rotateRouteCandidates(candidates[:eligibleCount], offset)
+	out := make([]string, 0, len(candidates))
+	out = append(out, rotated...)
+	out = append(out, candidates[eligibleCount:]...)
+	return out
+}
+
 func (s *Server) reorderByCapabilities(candidates []string, required requiredCapabilitySet, state adminState, providers map[string]config.Provider) []string {
 	if len(candidates) < 2 || len(required) == 0 { return candidates }
 	type ranked struct { model string; tier int; soft int; index int }
@@ -357,8 +392,11 @@ func extractPromptText(payload map[string]json.RawMessage, maxChars int) string 
 	return text
 }
 
-func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, candidates []string, state adminState, providers map[string]config.Provider, record *requestRecord) ([]string, bool) {
+func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, candidates []string, state adminState, providers map[string]config.Provider, required requiredCapabilitySet, record *requestRecord) ([]string, bool) {
 	if route.Strategy != "smart" || len(candidates)<2 { return candidates,false }
+	eligible, deferred := splitHardCompatibleCandidates(candidates,required,state,providers)
+	orderedBase := append(append([]string(nil),eligible...),deferred...)
+
 	session:=extractRequestSession(r,payload)
 	key:=""
 	if session!="" { key=comboName+":"+session }
@@ -366,17 +404,17 @@ func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payl
 	if key!="" {
 		if raw,ok:=s.smartSessions.Load(key);ok {
 			entry:=raw.(smartSessionEntry)
-			if time.Since(entry.UpdatedAt) <= 2*time.Hour && containsString(candidates,entry.Model) { previous=entry.Model } else { s.smartSessions.Delete(key) }
+			if time.Since(entry.UpdatedAt) <= 2*time.Hour && containsString(eligible,entry.Model) { previous=entry.Model } else { s.smartSessions.Delete(key) }
 		}
 	}
 	if route.SmartPolicy=="strict-lock" && previous!="" {
-		return moveCandidateFirst(candidates,previous),true
+		return append(moveCandidateFirst(eligible,previous),deferred...),true
 	}
 
 	decisionProvider:=s.providerByID(route.SmartDecisionProvider)
-	if decisionProvider==nil { return applyStickyDecision(candidates,previous),false }
-	decision:=s.requestSmartDecision(ctx,decisionProvider,route.SmartDecisionModel,payload,candidates,route,providers)
-	if decision==nil { return applyStickyDecision(candidates,previous),false }
+	if decisionProvider==nil { return applyStickyDecision(orderedBase,previous),false }
+	decision:=s.requestSmartDecision(ctx,decisionProvider,route.SmartDecisionModel,payload,eligible,route,providers)
+	if decision==nil { return applyStickyDecision(orderedBase,previous),false }
 	if record != nil {
 		record.DecisionUsageSeen = decision.Usage.PromptTokens > 0 || decision.Usage.CompletionTokens > 0 || decision.Usage.TotalTokens > 0
 		record.DecisionPromptTokens = decision.Usage.PromptTokens
@@ -385,18 +423,19 @@ func (s *Server) smartOrderCandidates(ctx context.Context, r *http.Request, payl
 		record.DecisionCostUSD = decision.CostUSD
 		record.DecisionCostKnown = decision.CostKnown
 	}
-	choice:=canonicalCandidate(candidates,decision.Choice,state,providers)
-	if choice=="" { return applyStickyDecision(candidates,previous),false }
+	choice:=canonicalCandidate(eligible,decision.Choice,state,providers)
+	if choice=="" { return applyStickyDecision(orderedBase,previous),false }
 
 	selected:=choice
 	if decision.Confidence < route.SmartConfidence {
 		if route.SmartPolicy=="smart-switch" && previous!="" {
 			selected=previous
 		} else {
-			return candidates,false
+			return orderedBase,false
 		}
 	}
-	ordered:=orderCandidatesByDecision(candidates,selected,decision.Probabilities,state,providers)
+	ordered:=orderCandidatesByDecision(eligible,selected,decision.Probabilities,state,providers)
+	ordered=append(ordered,deferred...)
 	if key!="" && route.SmartPolicy!="per-turn" {
 		s.smartSessions.Store(key,smartSessionEntry{Model:selected,UpdatedAt:time.Now()})
 		if lenCandidates:=len(candidates); lenCandidates>0 && int(s.smartSessionSweeps.Add(1))%128==0 {
