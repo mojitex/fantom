@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"sync/atomic"
@@ -13,6 +14,64 @@ import (
 
 	"github.com/mojitex/fantom/internal/config"
 )
+
+type usageQueueCoreStub struct {
+	CoreRouter
+	records []json.RawMessage
+}
+
+func (s *usageQueueCoreStub) UsageQueue(_ context.Context, _ int) ([]json.RawMessage, error) {
+	records := s.records
+	s.records = nil
+	return records, nil
+}
+
+func (s *usageQueueCoreStub) Close() {}
+
+func TestCollectCoreUsageBatchPersistsUnifiedSafeUsageHistory(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	handler := New(&config.Config{Routes: map[string]config.Route{}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	stub := &usageQueueCoreStub{records: []json.RawMessage{
+		json.RawMessage(`{"timestamp":"2026-11-06T09:00:00Z","latency_ms":1200,"ttft_ms":180,"tokens":{"input_tokens":10,"output_tokens":25,"total_tokens":35},"failed":false,"stream":true,"provider":"claude","model":"claude-sonnet","alias":"fast","auth_index":"claude-account-1","request_id":"trace-1","execution_id":"exec-1","endpoint":"/v1/messages","source":"oauth","api_key":"credential-secret","access_token_sha256":"token-hash-secret","client_ip":"192.0.2.10"}`),
+		json.RawMessage(`{"timestamp":"2026-11-06T09:01:00Z","latency_ms":400,"tokens":{"input_tokens":4,"output_tokens":0},"failed":true,"fail":{"status_code":429},"provider":"codex","model":"codex-latest","auth_index":"codex-account-2","execution_id":"exec-2"}`),
+	}}
+	handler.core = stub
+
+	if err := handler.collectCoreUsageBatch(context.Background()); err != nil {
+		t.Fatalf("collectCoreUsageBatch() error = %v", err)
+	}
+	if len(handler.store.snapshot().Requests) != 2 {
+		t.Fatalf("persisted request count = %d, want 2", len(handler.store.snapshot().Requests))
+	}
+
+	rows := handler.store.snapshot().Requests
+	first := rows[0]
+	if first.ID != "exec-1" || first.Model != "fast" || first.Provider != "claude" {
+		t.Fatalf("unexpected normalized usage identity: %#v", first)
+	}
+	if first.Engine != "cliproxy" || first.Account != "claude-account-1" || first.Endpoint != "/v1/messages" {
+		t.Fatalf("runtime/account metadata not retained: %#v", first)
+	}
+	if first.Status != http.StatusOK || first.PromptTokens != 10 || first.CompletionTokens != 25 || first.TotalTokens != 35 {
+		t.Fatalf("usage accounting fields not retained: %#v", first)
+	}
+	if first.TTFTMS != 180 || !first.Streaming {
+		t.Fatalf("stream timing metadata not retained: %#v", first)
+	}
+	if rows[1].Status != http.StatusTooManyRequests || rows[1].Engine != "cliproxy" {
+		t.Fatalf("failed runtime event was not normalized: %#v", rows[1])
+	}
+
+	snapshotJSON, err := json.Marshal(handler.store.snapshot())
+	if err != nil {
+		t.Fatalf("marshal safe request history: %v", err)
+	}
+	if strings.Contains(string(snapshotJSON), "credential-secret") || strings.Contains(string(snapshotJSON), "token-hash-secret") || strings.Contains(string(snapshotJSON), "192.0.2.10") {
+		t.Fatalf("sensitive SDK usage fields leaked into Fantom history: %s", snapshotJSON)
+	}
+}
 
 func TestHealthAndAuthenticatedChatProxy(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
