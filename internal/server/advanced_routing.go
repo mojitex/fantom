@@ -602,9 +602,18 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 		req.Header.Set("Content-Type","application/json")
 		req.Header.Set("Accept","application/json")
 		s.applyProviderHeaders(req,decisionProvider,key)
-		release, acquired := decisionProvider.tryAcquire()
-		if !acquired {
+		releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+		if !upstreamAcquired {
 			continue
+		}
+		releaseProvider, acquired := decisionProvider.tryAcquire()
+		if !acquired {
+			releaseUpstream()
+			continue
+		}
+		release := func() {
+			releaseProvider()
+			releaseUpstream()
 		}
 		resp,err:=decisionProvider.client.Do(req)
 		if err!=nil {
@@ -849,10 +858,20 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 		}
 		s.applyProviderHeaders(req,provider,key)
 		result.Attempts++
-		release, acquired := provider.tryAcquire()
+		releaseUpstream, upstreamAcquired := s.tryAcquireUpstream()
+		if !upstreamAcquired {
+			result.Err = errors.New("gateway reached its upstream concurrency limit")
+			continue
+		}
+		releaseProvider, acquired := provider.tryAcquire()
 		if !acquired {
+			releaseUpstream()
 			result.Err = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
 			continue
+		}
+		release := func() {
+			releaseProvider()
+			releaseUpstream()
 		}
 		resp,err:=provider.client.Do(req)
 		if err!=nil {
