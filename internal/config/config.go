@@ -10,26 +10,56 @@ import (
 	"strings"
 )
 
+type ModelCapabilities struct {
+	Vision        bool `json:"vision,omitempty"`
+	PDF           bool `json:"pdf,omitempty"`
+	AudioInput    bool `json:"audio_input,omitempty"`
+	VideoInput    bool `json:"video_input,omitempty"`
+	ImageOutput   bool `json:"image_output,omitempty"`
+	AudioOutput   bool `json:"audio_output,omitempty"`
+	Search        bool `json:"search,omitempty"`
+	Tools         bool `json:"tools,omitempty"`
+	Reasoning     bool `json:"reasoning,omitempty"`
+	ContextWindow int  `json:"context_window,omitempty"`
+	MaxOutput     int  `json:"max_output,omitempty"`
+}
+
+type ModelPricing struct {
+	InputPerMillionUSD  float64 `json:"input_per_million_usd"`
+	OutputPerMillionUSD float64 `json:"output_per_million_usd"`
+}
+
 type Provider struct {
-	ID              string            `json:"id"`
-	BaseURL         string            `json:"base_url"`
-	ChatPath        string            `json:"chat_path"`
-	ModelsURL       string            `json:"models_url"`
-	AuthType        string            `json:"auth_type"`
-	APIKeyEnv       string            `json:"api_key_env"`
-	APIKeysEnv      string            `json:"api_keys_env"`
-	Models          []string          `json:"models"`
-	TimeoutSeconds  int               `json:"timeout_seconds"`
-	Headers         map[string]string `json:"headers"`
-	APIKeys         []string          `json:"-"`
+	ID                string                       `json:"id"`
+	BaseURL           string                       `json:"base_url"`
+	ChatPath          string                       `json:"chat_path"`
+	ModelsURL         string                       `json:"models_url"`
+	AuthType          string                       `json:"auth_type"`
+	APIKeyEnv         string                       `json:"api_key_env"`
+	APIKeysEnv        string                       `json:"api_keys_env"`
+	Models            []string                     `json:"models"`
+	TimeoutSeconds    int                          `json:"timeout_seconds"`
+	Headers           map[string]string            `json:"headers"`
+	ModelCapabilities map[string]ModelCapabilities `json:"model_capabilities,omitempty"`
+	ModelPricing      map[string]ModelPricing      `json:"model_pricing,omitempty"`
+	APIKeys           []string                     `json:"-"`
 }
 
 type Route struct {
-	Provider       string   `json:"provider"`
-	UpstreamModel  string   `json:"upstream_model"`
-	FallbackModels []string `json:"fallback_models,omitempty"`
-	Strategy       string   `json:"strategy,omitempty"`
-	StickyLimit    int      `json:"sticky_limit,omitempty"`
+	Provider              string   `json:"provider"`
+	UpstreamModel         string   `json:"upstream_model"`
+	FallbackModels        []string `json:"fallback_models,omitempty"`
+	Strategy              string   `json:"strategy,omitempty"`
+	StickyLimit           int      `json:"sticky_limit,omitempty"`
+	SmartDecisionProvider string   `json:"smart_decision_provider,omitempty"`
+	SmartDecisionModel    string   `json:"smart_decision_model,omitempty"`
+	SmartPolicy           string   `json:"smart_policy,omitempty"`
+	SmartConfidence       float64  `json:"smart_confidence,omitempty"`
+	SmartTimeoutSeconds   int      `json:"smart_timeout_seconds,omitempty"`
+	FusionModels          []string `json:"fusion_models,omitempty"`
+	JudgeModel            string   `json:"judge_model,omitempty"`
+	FusionMinPanel        int      `json:"fusion_min_panel,omitempty"`
+	FusionTimeoutSeconds  int      `json:"fusion_timeout_seconds,omitempty"`
 }
 
 type Config struct {
