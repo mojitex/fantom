@@ -148,6 +148,7 @@ type Server struct {
 	routeCursors  sync.Map // map[public combo model]*atomic.Uint64
 	smartSessions sync.Map // map[combo:session]*smartSessionEntry
 	smartSessionSweeps atomic.Uint64
+	capacityCursors sync.Map // map[capability]*atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
 }
