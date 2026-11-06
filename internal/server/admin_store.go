@@ -227,6 +227,9 @@ func (d *adminStore) setRoutes(routes map[string]config.Route) error {
 		route.FallbackModels = cleanFallbacks
 
 		if strategy == "smart" {
+			if len(route.FallbackModels) == 0 {
+				return fmt.Errorf("route %q smart routing requires at least one alternative candidate model", alias)
+			}
 			route.SmartDecisionProvider = strings.TrimSpace(route.SmartDecisionProvider)
 			route.SmartDecisionModel = strings.TrimSpace(route.SmartDecisionModel)
 			if !providers[route.SmartDecisionProvider] { return fmt.Errorf("route %q smart decision provider is unknown", alias) }
