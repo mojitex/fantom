@@ -130,7 +130,7 @@ func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
 		MaxConcurrentRequests: 4,
 		MaxConcurrentUpstreamRequests: 4,
 		MaxConcurrentPerProvider: 4,
-		MaxInflightBodyBytes: 1 << 20,
+		MaxInflightBodyBytes: 2 << 20,
 		Providers: []config.Provider{{
 			ID: "test", BaseURL: upstream.URL, ChatPath: "/v1/chat/completions",
 			AuthType: "none", Models: []string{"test-model"}, TimeoutSeconds: 5,
