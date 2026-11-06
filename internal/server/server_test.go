@@ -270,6 +270,16 @@ func TestComboStrategyValidationAndLegacyDefault(t *testing.T) {
 	}
 }
 
+func TestRoundRobinCandidateOffsetHonorsStickyLimit(t *testing.T) {
+	var cursor atomic.Uint64
+	want := []int{0, 0, 1, 1, 2, 2, 0, 0}
+	for index, expected := range want {
+		if got := roundRobinCandidateOffset(&cursor, 2, 3); got != expected {
+			t.Fatalf("request %d candidate offset = %d, want %d", index+1, got, expected)
+		}
+	}
+}
+
 func TestRoundRobinComboRotatesCandidates(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 
