@@ -21,7 +21,6 @@ import (
 
 	"github.com/mojitex/fantom/internal/config"
 	"github.com/mojitex/fantom/internal/optimizer"
-	"github.com/mojitex/fantom/internal/routing"
 )
 
 type providerRuntime struct {
