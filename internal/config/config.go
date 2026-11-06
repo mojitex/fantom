@@ -71,6 +71,7 @@ type Config struct {
 	StaticDirectory    string           `json:"-"`
 	MaxRequestBytes    int64            `json:"-"`
 	MaxConcurrentRequests int            `json:"-"`
+	MaxConcurrentUpstreamRequests int     `json:"-"`
 	MaxConcurrentPerProvider int         `json:"-"`
 	DefaultTokenSaver             string `json:"-"`
 	DefaultCodeMode               string `json:"-"`
@@ -110,6 +111,10 @@ func Load() (*Config, error) {
 	cfg.MaxConcurrentRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_REQUESTS", 256)
 	if cfg.MaxConcurrentRequests > 4096 {
 		return nil, errors.New("FANTOM_MAX_CONCURRENT_REQUESTS cannot exceed 4096")
+	}
+	cfg.MaxConcurrentUpstreamRequests = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", 512)
+	if cfg.MaxConcurrentUpstreamRequests > 8192 {
+		return nil, errors.New("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS cannot exceed 8192")
 	}
 	cfg.MaxConcurrentPerProvider = ParsePositiveIntEnv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", 64)
 	if cfg.MaxConcurrentPerProvider > 2048 {
