@@ -287,6 +287,26 @@ func TestFusionRunsPanelAndJudgeAndAggregatesUsage(t *testing.T) {
 	if s.usageSummary(rows)["priced_requests"] != 1 { t.Fatalf("Fusion price coverage missing: %#v", s.usageSummary(rows)) }
 }
 
+func TestFusionSSEEmitsIncrementalChunksAndOptionalUsage(t *testing.T) {
+	response:=httptest.NewRecorder()
+	textValue:=strings.Repeat("A",120)+"\n"+strings.Repeat("ب",80)
+	writeFusionSSE(response,"fusion-model",textValue,40,25,65,true)
+	body:=response.Body.String()
+	if !strings.HasPrefix(response.Header().Get("Content-Type"),"text/event-stream") {
+		t.Fatalf("unexpected Fusion stream content type: %q",response.Header().Get("Content-Type"))
+	}
+	if strings.Count(body,"data: {")<5 {
+		t.Fatalf("Fusion stream was not emitted as incremental events: %s",body)
+	}
+	if !strings.Contains(body,"\"prompt_tokens\":40") || !strings.Contains(body,"\"completion_tokens\":25") || !strings.Contains(body,"data: [DONE]") {
+		t.Fatalf("Fusion stream omitted usage or terminator: %s",body)
+	}
+	withoutUsage:=httptest.NewRecorder()
+	writeFusionSSE(withoutUsage,"fusion-model","answer",1,1,2,false)
+	if strings.Contains(withoutUsage.Body.String(),"\"usage\"") {
+		t.Fatalf("Fusion emitted usage although include_usage was not requested: %s",withoutUsage.Body.String())
+	}
+}
 func TestFusionSinglePanelDegradesWithoutJudge(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
