@@ -696,7 +696,7 @@ func compactSearchList(input string) string {
 }
 
 func isNumberedLine(line string) bool {
-	value:=strings.TrimLeft(line," \\t")
+	value:=strings.TrimLeft(line, " \t")
 	digits:=0
 	for digits<len(value) && value[digits]>='0' && value[digits]<='9' {
 		digits++
