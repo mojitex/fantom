@@ -30,6 +30,8 @@ jobs:
         run: go vet ./...
       - name: Race detector
         run: go test -race ./...
+      - name: Load-test JavaScript syntax
+        run: node --input-type=module --check < scripts/load/fantom.js
       - name: Parallel gateway benchmark
         run: go test -run='^' -bench=BenchmarkGatewayChatCompletionsParallel -benchtime=2s -benchmem ./internal/server
 
