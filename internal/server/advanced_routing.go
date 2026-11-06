@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mojitex/fantom/internal/config"
