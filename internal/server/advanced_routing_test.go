@@ -67,7 +67,7 @@ func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
 		switch model {
 		case "router-model":
 			decisions.Add(1)
-			_, _ = io.WriteString(w, "{\"choices\":[{\"message\":{\"content\":\"{\\\"choice\\\":\\\"backup\\\",\\\"confidence\\\":0.96}\"}}]}")
+			_, _ = io.WriteString(w, "{\"choices\":[{\"message\":{\"content\":\"{\\\"choice\\\":\\\"backup\\\",\\\"confidence\\\":0.96}\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120}}")
 		case "model-b":
 			served.Add(1)
 			_, _ = io.WriteString(w, "{\"choices\":[{\"message\":{\"content\":\"selected backup\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}")
@@ -81,8 +81,8 @@ func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
 		DefaultProvider: "main", GatewayAPIKeys: []string{"gateway-secret"}, MaxRequestBytes: 1 << 20,
 		DefaultTokenSaver: "off", DefaultCodeMode: "off",
 		Providers: []config.Provider{
-			{ID: "main", BaseURL: upstream.URL + "/v1", AuthType: "none", Models: []string{"model-a", "model-b"}, TimeoutSeconds: 5},
-			{ID: "decision", BaseURL: upstream.URL + "/v1", AuthType: "none", Models: []string{"router-model"}, TimeoutSeconds: 5},
+			{ID: "main", BaseURL: upstream.URL + "/v1", AuthType: "none", Models: []string{"model-a", "model-b"}, ModelPricing: map[string]config.ModelPricing{"model-b": {InputPerMillionUSD:2, OutputPerMillionUSD:4}}, TimeoutSeconds: 5},
+			{ID: "decision", BaseURL: upstream.URL + "/v1", AuthType: "none", Models: []string{"router-model"}, ModelPricing: map[string]config.ModelPricing{"router-model": {InputPerMillionUSD:2, OutputPerMillionUSD:4}}, TimeoutSeconds: 5},
 		},
 		Routes: map[string]config.Route{
 			"smart-combo": {Provider: "main", UpstreamModel: "model-a", FallbackModels: []string{"backup"}, Strategy: "smart", SmartDecisionProvider: "decision", SmartDecisionModel: "router-model", SmartPolicy: "strict-lock", SmartConfidence: 0.8, SmartTimeoutSeconds: 2},
@@ -102,6 +102,14 @@ func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
 	}
 	if decisions.Load() != 1 { t.Fatalf("decision model called %d times, want 1", decisions.Load()) }
 	if served.Load() != 2 { t.Fatalf("selected model received %d requests, want 2", served.Load()) }
+	rows := s.store.snapshot().Requests
+	if len(rows) != 2 { t.Fatalf("smart request history count = %d, want 2", len(rows)) }
+	if rows[0].PromptTokens != 110 || rows[0].CompletionTokens != 25 || rows[0].TotalTokens != 135 {
+		t.Fatalf("smart decision + completion tokens were not combined: %#v", rows[0])
+	}
+	if !rows[0].CostKnown || rows[0].CostUSD < 0.00031 || rows[0].CostUSD > 0.00033 {
+		t.Fatalf("smart decision + completion cost not combined: %#v", rows[0])
+	}
 }
 
 func TestFusionRunsPanelAndJudgeAndAggregatesUsage(t *testing.T) {
