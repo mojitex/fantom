@@ -29,9 +29,22 @@ type providerRuntime struct {
 	nextKey          atomic.Uint64
 	keyMu            sync.Mutex
 	keyCooldowns     []time.Time
+	inflight         chan struct{}
 	catalogMu        sync.Mutex
 	catalogModels    []string
 	catalogFetchedAt time.Time
+}
+
+func (p *providerRuntime) tryAcquire() (func(), bool) {
+	if p == nil || p.inflight == nil {
+		return func() {}, true
+	}
+	select {
+	case p.inflight <- struct{}{}:
+		return func() { <-p.inflight }, true
+	default:
+		return nil, false
+	}
 }
 
 func (p *providerRuntime) apiKey() string {
@@ -151,6 +164,7 @@ type Server struct {
 	capacityCursors sync.Map // map[capability]*atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
+	inferenceSlots  chan struct{}
 }
 
 type modelItem struct {
@@ -187,19 +201,26 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 		}}
 		for _,p := range cfg.Providers { store.data.Providers=append(store.data.Providers,persistProvider(p)) }
 	}
-	s := &Server{config: cfg, providers: make(map[string]*providerRuntime), store:store, logger: logger}
+	maxConcurrent := cfg.MaxConcurrentRequests
+	if maxConcurrent <= 0 {
+		maxConcurrent = 256
+	}
+	s := &Server{
+		config: cfg, providers: make(map[string]*providerRuntime), store: store, logger: logger,
+		inferenceSlots: make(chan struct{}, maxConcurrent),
+	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("/api/admin/", s.authenticateAdmin(s.handleAdmin))
 	mux.HandleFunc("GET /v1/models", s.authenticate(s.handleModels))
-	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.handleChatCompletions))
+	mux.HandleFunc("POST /v1/chat/completions", s.authenticate(s.limitInference(s.handleChatCompletions)))
 	// Protocol endpoints not implemented by the compatibility gateway are served
 	// by the embedded CLIProxyAPI runtime after Fantom validates the client key.
-	mux.Handle("/v1/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/v1beta/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/openai/v1/", s.authenticate(s.handleCoreAPI))
-	mux.Handle("/backend-api/codex/", s.authenticate(s.handleCoreAPI))
+	mux.Handle("/v1/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/v1beta/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/openai/v1/", s.authenticate(s.limitInference(s.handleCoreAPI)))
+	mux.Handle("/backend-api/codex/", s.authenticate(s.limitInference(s.handleCoreAPI)))
 	mux.Handle("/v0/management", s.authenticateAdmin(s.handleCoreManagement))
 	mux.Handle("/v0/management/", s.authenticateAdmin(s.handleCoreManagement))
 	// v8 management routes power Fantom's native TypeScript account/quota control plane.
@@ -351,18 +372,42 @@ func (s *Server) runCoreUsageCollector(ctx context.Context, done chan struct{}) 
 		}
 	}
 }
-func newProviderRuntime(provider config.Provider) *providerRuntime {
-	if provider.ChatPath=="" { provider.ChatPath="/chat/completions" }
-	timeout:=provider.TimeoutSeconds; if timeout<=0 { timeout=100 }
-	dialer:=&net.Dialer{Timeout:10*time.Second,KeepAlive:30*time.Second}
-	transport:=&http.Transport{Proxy:http.ProxyFromEnvironment,DialContext:dialer.DialContext,ForceAttemptHTTP2:true,MaxIdleConns:256,MaxIdleConnsPerHost:64,IdleConnTimeout:90*time.Second,TLSHandshakeTimeout:10*time.Second,ExpectContinueTimeout:time.Second,ResponseHeaderTimeout:time.Duration(timeout)*time.Second}
-	return &providerRuntime{config:provider,client:&http.Client{Transport:transport}}
+func newProviderRuntime(provider config.Provider, maxConcurrent int) *providerRuntime {
+	if provider.ChatPath == "" {
+		provider.ChatPath = "/chat/completions"
+	}
+	timeout := provider.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 100
+	}
+	if maxConcurrent <= 0 {
+		maxConcurrent = 64
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment, DialContext: dialer.DialContext, ForceAttemptHTTP2: true,
+		MaxConnsPerHost: maxConcurrent, MaxIdleConns: maxConcurrent * 2,
+		MaxIdleConnsPerHost: maxConcurrent, IdleConnTimeout: 90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
+	}
+	return &providerRuntime{
+		config: provider, client: &http.Client{Transport: transport},
+		inflight: make(chan struct{}, maxConcurrent),
+	}
 }
 
 func (s *Server) reloadProviderRuntime() {
 	state:=s.store.snapshot()
 	next:=make(map[string]*providerRuntime,len(state.Providers))
-	for _,saved:=range state.Providers { p:=saved.runtime(); next[p.ID]=newProviderRuntime(p) }
+	maxPerProvider := s.config.MaxConcurrentPerProvider
+	if maxPerProvider <= 0 {
+		maxPerProvider = 64
+	}
+	for _, saved := range state.Providers {
+		p := saved.runtime()
+		next[p.ID] = newProviderRuntime(p, maxPerProvider)
+	}
 	s.providersMu.Lock()
 	old := s.providers
 	s.providers = next
@@ -404,6 +449,26 @@ func (s *Server) environmentKeyValid(provided string) bool {
 		if subtle.ConstantTimeCompare([]byte(provided),[]byte(key))==1 { valid=1 }
 	}
 	return valid==1
+}
+
+// limitInference applies fail-fast admission control to model execution paths.
+// A bounded in-flight count protects memory, goroutines and upstream quotas during bursts.
+func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.inferenceSlots == nil {
+			next(w, r)
+			return
+		}
+		select {
+		case s.inferenceSlots <- struct{}{}:
+			defer func() { <-s.inferenceSlots }()
+			next(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("X-Fantom-Admission", "rejected")
+			writeAPIError(w, http.StatusServiceUnavailable, "gateway is at its configured concurrency limit; retry shortly", "service_unavailable")
+		}
+	}
 }
 
 func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
@@ -455,7 +520,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	state:=s.store.snapshot()
+	state:=s.store.routingSnapshot()
 	items:=make([]modelItem,0)
 	seen:=make(map[string]struct{})
 	providerConfigs := s.providerMap(state)
@@ -605,7 +670,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state:=s.store.snapshot()
+	state:=s.store.routingSnapshot()
 	record.Model=input.Model
 	record.Streaming=string(payload["stream"])=="true"
 	providerMap:=s.providerMap(state)
@@ -695,6 +760,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var response *http.Response
+	var responseRelease func()
+	var providerSaturated bool
 	var lastErr error
 	var selectedProvider *providerRuntime
 	selectedUpstreamModel:=""
@@ -740,6 +807,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr=fmt.Errorf("all credentials for provider %q are cooling down",target.ProviderID)
 			continue
 		}
+		responseRelease = nil
 		for keyIndex,key:=range keyAttempts {
 			if provider.config.AuthType=="bearer"&&key=="" {
 				lastErr=fmt.Errorf("provider %q has no configured API key",target.ProviderID)
@@ -757,21 +825,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.applyProviderHeaders(upstreamRequest,provider,key)
+			release, acquired := provider.tryAcquire()
+			if !acquired {
+				providerSaturated = true
+				lastErr = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
+				break
+			}
 			attempts++
 			response,requestErr=provider.client.Do(upstreamRequest)
 			if requestErr!=nil {
+				release()
 				if r.Context().Err()!=nil { return }
 				lastErr=requestErr
 				s.logger.Warn("upstream request failed","provider",provider.config.ID,"model",candidateModel,"error",requestErr,"attempt",attempts)
 				response=nil
 				break
 			}
+			responseRelease = release
 			if shouldRetryCredential(response.StatusCode) {
 				provider.cooldownCredential(key, response.StatusCode, response.Header.Get("Retry-After"))
 				if keyIndex<len(keyAttempts)-1 {
 					lastErr=fmt.Errorf("provider %s credential returned HTTP %d",provider.config.ID,response.StatusCode)
 					credentialRetries++
 					_ = response.Body.Close()
+					release()
+					responseRelease = nil
 					response=nil
 					continue
 				}
@@ -782,6 +860,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr=fmt.Errorf("provider %s returned HTTP %d",provider.config.ID,response.StatusCode)
 			s.logger.Warn("upstream returned fallback-eligible status","provider",provider.config.ID,"model",candidateModel,"status",response.StatusCode)
 			_ = response.Body.Close()
+			if responseRelease != nil {
+				responseRelease()
+				responseRelease = nil
+			}
 			response=nil
 			continue
 		}
@@ -818,12 +900,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if cooldownRetrySeconds > 0 {
 			status = http.StatusServiceUnavailable
 			w.Header().Set("Retry-After", strconv.Itoa(cooldownRetrySeconds))
+		} else if providerSaturated {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "1")
+			message = "all compatible providers are at their concurrency limit"
 		}
-		if lastErr!=nil { message="all route attempts failed: "+lastErr.Error() }
+		if lastErr!=nil && !providerSaturated { message="all route attempts failed: "+lastErr.Error() }
 		writeAPIError(w,status,message,"provider_error")
 		return
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+		if responseRelease != nil {
+			responseRelease()
+		}
+	}()
 	if selectedProvider!=nil {
 		w.Header().Set("X-Fantom-Selected-Provider",selectedProvider.config.ID)
 	}
