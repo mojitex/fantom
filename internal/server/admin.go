@@ -39,7 +39,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			var body struct { Adapters map[string]capacityAdapterPool `json:"adapters"` }
 			if !decodeAdminJSON(w, r, &body) { return }
-			if body.Adapters == nil { body.Adapters = map[string][]string{} }
+			if body.Adapters == nil { body.Adapters = map[string]capacityAdapterPool{} }
 			if err := s.store.setCapacityAdapters(body.Adapters); err != nil { adminError(w, http.StatusBadRequest, err.Error()); return }
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": body.Adapters})
 		default: methodNotAllowed(w)
