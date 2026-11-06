@@ -217,8 +217,16 @@ func (s *Server) saveProvider(w http.ResponseWriter,r *http.Request,id string) {
 }
 func (s *Server) testProvider(w http.ResponseWriter,r *http.Request,id string) {
 	var target *providerRuntime
-	for _,saved:=range s.store.snapshot().Providers {
-		if saved.ID==id { p:=saved.runtime(); target=newProviderRuntime(p); break }
+	maxPerProvider := s.config.MaxConcurrentPerProvider
+	if maxPerProvider <= 0 {
+		maxPerProvider = 64
+	}
+	for _, saved := range s.store.snapshot().Providers {
+		if saved.ID == id {
+			p := saved.runtime()
+			target = newProviderRuntime(p, maxPerProvider)
+			break
+		}
 	}
 	if target==nil { adminError(w,http.StatusNotFound,"provider not found"); return }
 
