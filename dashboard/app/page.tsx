@@ -274,7 +274,8 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
 
 
 function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
- const [draft,setDraft]=useState({vision:"",pdf:"",audio_input:"",video_input:""});
+ const blank=()=>({enabled:false,roundRobin:false,models:""});
+ const [draft,setDraft]=useState({vision:blank(),pdf:blank(),audio_input:blank(),video_input:blank()});
  const [loading,setLoading]=useState(false);
  const [saving,setSaving]=useState(false);
  const [error,setError]=useState("");
@@ -284,11 +285,15 @@ function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestIn
   try{
    const data=await request("/api/admin/capacity-adapters");
    const adapters=data.adapters||{};
+   const normalize=(value:any)=>{
+    if(Array.isArray(value))return {enabled:value.length>0,roundRobin:false,models:value.join("\n")};
+    return {enabled:value?.enabled===true,roundRobin:value?.roundRobin===true,models:Array.isArray(value?.models)?value.models.join("\n"):""};
+   };
    setDraft({
-    vision:(adapters.vision||[]).join("\n"),
-    pdf:(adapters.pdf||[]).join("\n"),
-    audio_input:(adapters.audio_input||[]).join("\n"),
-    video_input:(adapters.video_input||[]).join("\n")
+    vision:normalize(adapters.vision),
+    pdf:normalize(adapters.pdf),
+    audio_input:normalize(adapters.audio_input),
+    video_input:normalize(adapters.video_input)
    });
   }catch(e){setError(e instanceof Error?e.message:"Could not load capacity adapter pools");}
   finally{setLoading(false);}
@@ -297,34 +302,41 @@ function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestIn
  async function save(e:FormEvent){
   e.preventDefault();setSaving(true);setError("");setNotice("");
   const adapters=Object.fromEntries(Object.entries(draft).map(([key,value])=>[
-   key,value.split(/\r?\n|,/).map(model=>model.trim()).filter(Boolean)
+   key,{
+    enabled:value.enabled,
+    roundRobin:value.roundRobin,
+    models:value.models.split(/\r?\n|,/).map(model=>model.trim()).filter(Boolean)
+   }
   ]));
   try{
    const result=await request("/api/admin/capacity-adapters",{method:"PUT",body:JSON.stringify({adapters})});
-   setNotice("Capacity adapter pools saved.");
+   setNotice("Capacity adapter policies saved.");
+   const normalize=(value:any)=>({enabled:value?.enabled===true,roundRobin:value?.roundRobin===true,models:Array.isArray(value?.models)?value.models.join("\n"):""});
    setDraft({
-    vision:(result.adapters?.vision||[]).join("\n"),
-    pdf:(result.adapters?.pdf||[]).join("\n"),
-    audio_input:(result.adapters?.audio_input||[]).join("\n"),
-    video_input:(result.adapters?.video_input||[]).join("\n")
+    vision:normalize(result.adapters?.vision),pdf:normalize(result.adapters?.pdf),
+    audio_input:normalize(result.adapters?.audio_input),video_input:normalize(result.adapters?.video_input)
    });
   }catch(e){setError(e instanceof Error?e.message:"Could not save capacity adapter pools");}
   finally{setSaving(false);}
  }
+ const update=(key:"vision"|"pdf"|"audio_input"|"video_input",patch:Partial<{enabled:boolean;roundRobin:boolean;models:string}>)=>setDraft(prev=>({...prev,[key]:{...prev[key],...patch}}));
+ const pool=(key:"vision"|"pdf"|"audio_input"|"video_input",title:string,description:string)=><section className="panel settings-panel" key={key}>
+  <div className="panel-title"><div className="icon-tile violet"><Icon name="layers"/></div><div><b>{title}</b><span>{description}</span></div></div>
+  <div className="setting-toggle"><div><b>Enable adapter</b><span>Use this pool only when the current candidate list has no model supporting this input type.</span></div><input type="checkbox" checked={draft[key].enabled} onChange={e=>update(key,{enabled:e.target.checked})}/></div>
+  <div className="setting-toggle"><div><b>Round robin within pool</b><span>Rotate adapter models between requests. Disabled means preserve the listed priority order.</span></div><input type="checkbox" checked={draft[key].roundRobin} disabled={!draft[key].enabled} onChange={e=>update(key,{roundRobin:e.target.checked})}/></div>
+  <label>MODEL IDS</label>
+  <textarea rows={3} value={draft[key].models} disabled={!draft[key].enabled} onChange={e=>update(key,{models:e.target.value})} placeholder={"provider/model or combo-alias, one per line"}/>
+ </section>;
  return <form onSubmit={save} className="core-routing-settings">
-  <div className="page-heading compact"><div><div className="eyebrow">CAPABILITY-AWARE ROUTING</div><h2>Capacity adapter pools</h2><p>Fallback models are only prepended when none of the original candidates supports the required input modality.</p></div><button type="button" className="secondary" onClick={()=>void load()} disabled={loading||saving}><Icon name="refresh" size={14}/> Refresh</button></div>
+  <div className="page-heading compact"><div><div className="eyebrow">CAPABILITY-AWARE ROUTING</div><h2>Capacity adapter pools</h2><p>Independent enablement and routing policy per modality. Adapters are considered only if no original candidate supports all required hard modalities.</p></div><button type="button" className="secondary" onClick={()=>void load()} disabled={loading||saving}><Icon name="refresh" size={14}/> Refresh</button></div>
   {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button type="button" onClick={()=>{setError("");setNotice("");}}>×</button></div>}
   <div className="core-routing-grid">
-   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="layers"/></div><div><b>Image & document inputs</b><span>One model ID per line. Keep each pool to models you have tested.</span></div></div>
-    <label>VISION POOL</label><textarea rows={3} value={draft.vision} onChange={e=>setDraft({...draft,vision:e.target.value})} placeholder="provider/vision-model"/>
-    <label>PDF POOL</label><textarea rows={3} value={draft.pdf} onChange={e=>setDraft({...draft,pdf:e.target.value})} placeholder="provider/pdf-model"/>
-   </section>
-   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="cpu"/></div><div><b>Audio & video inputs</b><span>These models are considered only when the incoming request includes that media type.</span></div></div>
-    <label>AUDIO INPUT POOL</label><textarea rows={3} value={draft.audio_input} onChange={e=>setDraft({...draft,audio_input:e.target.value})} placeholder="provider/audio-model"/>
-    <label>VIDEO INPUT POOL</label><textarea rows={3} value={draft.video_input} onChange={e=>setDraft({...draft,video_input:e.target.value})} placeholder="provider/video-model"/>
-   </section>
+   {pool("vision","Vision","Image inputs such as PNG, JPG, WebP and screenshots.")}
+   {pool("pdf","PDF / Documents","PDF and document inputs where supported by the selected upstream.")}
+   {pool("audio_input","Audio input","Incoming audio and transcription-capable models.")}
+   {pool("video_input","Video input","Video or frame-sequence capable models.")}
   </div>
-  <div className="settings-save"><span>Max 16 unique model IDs per capability. Actual compatibility is checked against each model's configured capability metadata.</span><button className="primary" disabled={saving||loading}>{saving?"SAVING…":"Save capacity pools"} <Icon name="check" size={15}/></button></div>
+  <div className="settings-save"><span>Max 16 unique model IDs per pool. Legacy array settings are migrated automatically.</span><button className="primary" disabled={saving||loading}>{saving?"SAVING…":"Save capacity pools"} <Icon name="check" size={15}/></button></div>
  </form>;
 }
 
