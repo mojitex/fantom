@@ -45,11 +45,32 @@ func cloneModelPricing(source map[string]config.ModelPricing) map[string]config.
 	for key, value := range source { out[key] = value }
 	return out
 }
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
 func persistProvider(p config.Provider) persistedProvider {
-	return persistedProvider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
+	return persistedProvider{
+		ID: p.ID, BaseURL: p.BaseURL, ChatPath: p.ChatPath, ModelsURL: p.ModelsURL,
+		AuthType: p.AuthType, Models: append([]string(nil), p.Models...), TimeoutSeconds: p.TimeoutSeconds,
+		Headers: cloneStringMap(p.Headers), ModelCapabilities: cloneModelCapabilities(p.ModelCapabilities),
+		ModelPricing: cloneModelPricing(p.ModelPricing), APIKeys: append([]string(nil), p.APIKeys...),
+	}
 }
 func (p persistedProvider) runtime() config.Provider {
-	return config.Provider{ID:p.ID, BaseURL:p.BaseURL, ChatPath:p.ChatPath, ModelsURL:p.ModelsURL, AuthType:p.AuthType, Models:append([]string(nil),p.Models...), TimeoutSeconds:p.TimeoutSeconds, Headers:p.Headers, ModelCapabilities:cloneModelCapabilities(p.ModelCapabilities), ModelPricing:cloneModelPricing(p.ModelPricing), APIKeys:append([]string(nil),p.APIKeys...)}
+	return config.Provider{
+		ID: p.ID, BaseURL: p.BaseURL, ChatPath: p.ChatPath, ModelsURL: p.ModelsURL,
+		AuthType: p.AuthType, Models: append([]string(nil), p.Models...), TimeoutSeconds: p.TimeoutSeconds,
+		Headers: cloneStringMap(p.Headers), ModelCapabilities: cloneModelCapabilities(p.ModelCapabilities),
+		ModelPricing: cloneModelPricing(p.ModelPricing), APIKeys: append([]string(nil), p.APIKeys...),
+	}
 }
 
 type storedClientKey struct {
@@ -205,23 +226,51 @@ func (d *adminStore) saveLocked() error {
 	return nil
 }
 
-func (d *adminStore) snapshot() adminState {
-	d.mu.RLock(); defer d.mu.RUnlock()
-	out := d.data
-	out.Providers = append([]persistedProvider(nil), d.data.Providers...)
-	out.Routes = make(map[string]config.Route,len(d.data.Routes)); for k,v := range d.data.Routes { out.Routes[k]=v }
-	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(d.data.CapacityAdapters))
-	for capability, pool := range d.data.CapacityAdapters {
+func cloneAdminState(source adminState, includeHistory bool) adminState {
+	out := source
+	out.Providers = make([]persistedProvider, len(source.Providers))
+	for i, provider := range source.Providers {
+		out.Providers[i] = provider
+		out.Providers[i].Models = append([]string(nil), provider.Models...)
+		out.Providers[i].APIKeys = append([]string(nil), provider.APIKeys...)
+		out.Providers[i].Headers = cloneStringMap(provider.Headers)
+		out.Providers[i].ModelCapabilities = cloneModelCapabilities(provider.ModelCapabilities)
+		out.Providers[i].ModelPricing = cloneModelPricing(provider.ModelPricing)
+	}
+	out.Routes = make(map[string]config.Route, len(source.Routes))
+	for key, route := range source.Routes {
+		route.FallbackModels = append([]string(nil), route.FallbackModels...)
+		route.FusionModels = append([]string(nil), route.FusionModels...)
+		out.Routes[key] = route
+	}
+	out.CapacityAdapters = make(map[string]capacityAdapterPool, len(source.CapacityAdapters))
+	for capability, pool := range source.CapacityAdapters {
 		pool.Models = append([]string(nil), pool.Models...)
 		out.CapacityAdapters[capability] = pool
 	}
-	for i := range out.Providers {
-		out.Providers[i].ModelCapabilities = cloneModelCapabilities(out.Providers[i].ModelCapabilities)
-		out.Providers[i].ModelPricing = cloneModelPricing(out.Providers[i].ModelPricing)
+	if includeHistory {
+		out.ClientKeys = append([]storedClientKey(nil), source.ClientKeys...)
+		out.Requests = append([]requestRecord(nil), source.Requests...)
+	} else {
+		out.ClientKeys = nil
+		out.Requests = nil
 	}
-	out.ClientKeys = append([]storedClientKey(nil),d.data.ClientKeys...)
-	out.Requests = append([]requestRecord(nil),d.data.Requests...)
 	return out
+}
+
+// routingSnapshot deliberately excludes request history and client-key metadata.
+// Inference runs on this hot path; copying thousands of history rows per request
+// would make CPU and allocation cost grow with retained telemetry rather than RPS.
+func (d *adminStore) routingSnapshot() adminState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return cloneAdminState(d.data, false)
+}
+
+func (d *adminStore) snapshot() adminState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return cloneAdminState(d.data, true)
 }
 
 func (d *adminStore) replaceProvider(p config.Provider) error {
