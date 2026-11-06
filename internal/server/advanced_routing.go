@@ -478,9 +478,9 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 	if envelope.Usage.TotalTokens == 0 { envelope.Usage.TotalTokens = envelope.Usage.PromptTokens + envelope.Usage.CompletionTokens }
 	decision := &smartDecision{Usage:envelope.Usage}
 	decision.CostUSD, decision.CostKnown = estimateRequestCost(decisionProvider.config, decisionModel, envelope.Usage.PromptTokens, envelope.Usage.CompletionTokens)
-	if len(envelope.Choices)==0 { return decision,nil }
+	if len(envelope.Choices)==0 { return decision }
 	content:=extractJSONObject(envelope.Choices[0].Message.Content)
-	if content=="" { return decision,nil }
+	if content=="" { return decision }
 	var parsed struct {
 		Choice string `json:"choice"`
 		Confidence float64 `json:"confidence"`
@@ -491,17 +491,31 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 			Probabilities map[string]float64 `json:"probabilities"`
 		} `json:"route"` } `json:"answers"`
 	}
-	if json.Unmarshal([]byte(content),&parsed)!=nil { return decision,nil }
+	if json.Unmarshal([]byte(content),&parsed)!=nil { return decision }
 	if parsed.Choice=="" {
 		parsed.Choice=parsed.Answers.Route.Choice
 		parsed.Confidence=parsed.Answers.Route.Confidence
 		parsed.Probabilities=parsed.Answers.Route.Probabilities
 	}
-	if parsed.Choice=="" || parsed.Confidence<0 || parsed.Confidence>1 { return decision,nil }
+	if parsed.Choice=="" || parsed.Confidence<0 || parsed.Confidence>1 { return decision }
 	decision.Choice=parsed.Choice
 	decision.Confidence=parsed.Confidence
 	decision.Probabilities=parsed.Probabilities
-	return decision,nil
+	return decision
+}
+
+func mergeSmartDecisionUsage(record *requestRecord) {
+	if record == nil || !record.DecisionUsageSeen {
+		return
+	}
+	record.PromptTokens += record.DecisionPromptTokens
+	record.CompletionTokens += record.DecisionCompletionTokens
+	record.TotalTokens += record.DecisionTotalTokens
+	if record.CostKnown && record.DecisionCostKnown {
+		record.CostUSD += record.DecisionCostUSD
+	} else {
+		record.CostKnown = false
+	}
 }
 
 func extractJSONObject(input string) string {
