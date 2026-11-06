@@ -157,6 +157,11 @@ type clientAdmissionSlot struct {
 	refs  int
 }
 
+type clientAdmissionShard struct {
+	mu    sync.Mutex
+	slots map[[32]byte]*clientAdmissionSlot
+}
+
 type Server struct {
 	config      *config.Config
 	providersMu sync.RWMutex
@@ -184,8 +189,7 @@ type Server struct {
 	bodyBudgetRejections atomic.Uint64
 	clientRejections     atomic.Uint64
 	maxConcurrentPerClient int
-	clientSlotsMu        sync.Mutex
-	clientSlots          map[[32]byte]*clientAdmissionSlot
+	clientSlotShards      [64]clientAdmissionShard
 }
 
 type modelItem struct {
@@ -247,7 +251,6 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 		upstreamSlots: make(chan struct{}, maxConcurrentUpstream),
 		maxInflightBodyBytes: maxInflightBodyBytes,
 		maxConcurrentPerClient: maxConcurrentPerClient,
-		clientSlots: make(map[[32]byte]*clientAdmissionSlot),
 	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
@@ -538,31 +541,37 @@ func (s *Server) tryAcquireClient(identity [32]byte) (func(), bool) {
 	if s == nil || s.maxConcurrentPerClient <= 0 {
 		return func() {}, true
 	}
-	s.clientSlotsMu.Lock()
-	slot := s.clientSlots[identity]
+	// Spread admission locks over independent shards so unrelated API keys do
+	// not contend on a single global mutex under high request rates.
+	shard := &s.clientSlotShards[int(identity[0])%len(s.clientSlotShards)]
+	shard.mu.Lock()
+	if shard.slots == nil {
+		shard.slots = make(map[[32]byte]*clientAdmissionSlot)
+	}
+	slot := shard.slots[identity]
 	if slot == nil {
 		slot = &clientAdmissionSlot{slots: make(chan struct{}, s.maxConcurrentPerClient)}
-		s.clientSlots[identity] = slot
+		shard.slots[identity] = slot
 	}
 	slot.refs++
 	select {
 	case slot.slots <- struct{}{}:
-		s.clientSlotsMu.Unlock()
+		shard.mu.Unlock()
 		return func() {
 			<-slot.slots
-			s.clientSlotsMu.Lock()
+			shard.mu.Lock()
 			slot.refs--
-			if slot.refs == 0 && s.clientSlots[identity] == slot {
-				delete(s.clientSlots, identity)
+			if slot.refs == 0 && shard.slots[identity] == slot {
+				delete(shard.slots, identity)
 			}
-			s.clientSlotsMu.Unlock()
+			shard.mu.Unlock()
 		}, true
 	default:
 		slot.refs--
-		if slot.refs == 0 && s.clientSlots[identity] == slot {
-			delete(s.clientSlots, identity)
+		if slot.refs == 0 && shard.slots[identity] == slot {
+			delete(shard.slots, identity)
 		}
-		s.clientSlotsMu.Unlock()
+		shard.mu.Unlock()
 		return nil, false
 	}
 }
