@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"sync"
 	"strings"
 	"time"
 
@@ -115,7 +116,7 @@ func requiredCapabilities(payload map[string]json.RawMessage) requiredCapability
 		}
 	}
 	for _, key := range []string{"reasoning_effort", "thinking", "reasoning"} {
-		if raw := payload[key]; len(raw) > 0 && string(raw) != "null" && string(raw) != ""off"" {
+		if raw := payload[key]; len(raw) > 0 && string(raw) != "null" && string(raw) != "\"off\"" {
 			required["reasoning"] = true
 		}
 	}
