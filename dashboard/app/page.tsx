@@ -184,6 +184,43 @@ export default function Home(){
 }
 
 
+function quotaMetrics(quota?:{observed_at?:string;signals?:Record<string,string>}){
+ const entries=Object.entries(quota?.signals||{});
+ const find=(pattern:RegExp)=>entries.find(([key])=>pattern.test(key.toLowerCase()));
+ const numeric=(entry?:[string,string])=>{
+  if(!entry)return null;
+  const value=String(entry[1]).replace(/,/g,"").replace(/%/g,"").trim();
+  const number=Number(value);
+  return Number.isFinite(number)?number:null;
+ };
+ const percentEntry=find(/(used|usage|consumed).*percent|percent.*(used|usage|consumed)/);
+ const remainingEntry=find(/remaining.*percent|percent.*remaining/);
+ const usedEntry=find(/^(used|usage|consumed|requests_used|tokens_used)$/);
+ const totalEntry=find(/^(limit|total|quota|requests_limit|tokens_limit)$/);
+ let percent=numeric(percentEntry);
+ if(percent===null&&remainingEntry){const remaining=numeric(remainingEntry);if(remaining!==null)percent=100-remaining;}
+ const used=numeric(usedEntry),total=numeric(totalEntry);
+ if(percent===null&&used!==null&&total!==null&&total>0)percent=used/total*100;
+ const resetEntry=find(/reset|renew|refill|refresh_at|resets_at/);
+ return {percent:percent===null?null:Math.min(100,Math.max(0,percent)),used,total,reset:resetEntry?.[1]||""};
+}
+function QuotaCell({account}:{account:Credential}){
+ const quota=quotaMetrics(account.quota);
+ const models=Object.entries(account.model_quotas||{}).slice(0,4).map(([name,data])=>({name,metrics:quotaMetrics(data)}));
+ const hasSignals=Object.keys(account.quota?.signals||{}).length>0;
+ return <div className="quota-cell">
+  {account.quota_blocked&&<b className="warning-text">Quota exhausted</b>}
+  {quota.percent!==null&&<div className="quota-meter"><div><small>Account usage</small><b>{quota.percent.toFixed(1)}%</b></div><div className="bar-track"><i className="bar-fill tone-1" style={{width:quota.percent+"%"}}/></div></div>}
+  {quota.used!==null&&quota.total!==null&&<small>{formatNumber(quota.used)} / {formatNumber(quota.total)} used</small>}
+  {quota.reset&&<small>Reset / renewal: {quota.reset}</small>}
+  {account.quota?.observed_at&&<small>Observed {ago(account.quota.observed_at)}</small>}
+  {account.access_token_expires_at&&<small>Token expires {new Date(account.access_token_expires_at).toLocaleString()}</small>}
+  {models.length>0&&<details><summary>Per-model quota ({Object.keys(account.model_quotas||{}).length})</summary>{models.map(model=><div className="quota-model" key={model.name}><span>{model.name}</span><b>{model.metrics.percent===null?"—":model.metrics.percent.toFixed(1)+"%"}</b>{model.metrics.percent!==null&&<div className="bar-track"><i className="bar-fill tone-1" style={{width:model.metrics.percent+"%"}}/></div>}{model.metrics.reset&&<small>Reset: {model.metrics.reset}</small>}</div>)}</details>}
+  {!hasSignals&&!account.access_token_expires_at&&!account.quota_blocked&&models.length===0&&<small>No quota signal reported by provider</small>}
+  <details><summary>Raw quota signals</summary><pre>{JSON.stringify({quota:account.quota||{},models:account.model_quotas||{}},null,2)}</pre></details>
+ </div>;
+}
+
 function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
  const [accounts,setAccounts]=useState<Credential[]>([]);
  const [loading,setLoading]=useState(false);
@@ -220,7 +257,7 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
     {filtered.map(account=>{const active=!account.disabled&&!account.unavailable;const health=account.disabled?"Disabled":account.requires_sign_in?"Sign in required":account.quota_blocked?"Quota blocked":account.unavailable?"Cooling down":active?"Ready":(account.status||"Unavailable");const tone=active?"green":account.requires_sign_in||account.quota_blocked?"amber":"red";const key=account.auth_index||account.id;return <tr key={key}>
      <td><b>{account.email||account.account||account.label||account.name||account.id}</b><small className="account-subline">{account.name} · #{account.auth_index}</small></td><td><span className="mono">{account.provider||account.type||"—"}</span></td>
      <td><span className={cls("tag",tone)}>{health}</span>{account.renewal_state&&<small className="account-subline">{account.renewal_state}</small>}</td>
-     <td><div className="quota-cell">{account.quota_blocked?<b className="warning-text">Quota exhausted</b>:null}{account.quota?.observed_at?<small>Observed {ago(account.quota.observed_at)}</small>:null}{account.access_token_expires_at?<small>Token expires {new Date(account.access_token_expires_at).toLocaleString()}</small>:null}{!account.quota?.observed_at&&!account.access_token_expires_at&&!account.quota_blocked?<small>No quota signal reported</small>:null}<details><summary>Quota details</summary><pre>{JSON.stringify({quota:account.quota||{},models:account.model_quotas||{}},null,2)}</pre></details></div></td>
+     <td><QuotaCell account={account}/></td>
      <td>{account.last_refresh?ago(account.last_refresh):"—"}</td>
      <td><div className="account-actions">
       <button className="ghost" title="Refresh OAuth token" disabled={!!busy} onClick={()=>void runAction("refresh:"+key,()=>request("/v8/management/credentials/refresh",{method:"POST",body:JSON.stringify({name:account.name,auth_index:account.auth_index})}),"Credential refresh requested.")}><Icon name="refresh" size={13}/></button>
