@@ -100,7 +100,7 @@ func detectRTKFilter(text string) string {
 	case rtkSearchRE.MatchString(head):
 		return "search-list"
 	}
-	if len(lines) >= rtkSmartMinLines && isMostlyNumbered(lines) {
+	if strings.Count(text, "\n")+1 >= rtkSmartMinLines && isMostlyNumbered(lines) {
 		return "read-numbered"
 	}
 	if len(nonEmpty) >= 5 {
