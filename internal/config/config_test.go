@@ -26,6 +26,7 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	t.Setenv("FANTOM_TOKEN_SAVER", "safe")
 	t.Setenv("FANTOM_CODE_MODE", "off")
 	t.Setenv("FANTOM_MAX_CONCURRENT_REQUESTS", "")
+	t.Setenv("FANTOM_MAX_INFLIGHT_BODY_MB", "")
 	t.Setenv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", "")
 	t.Setenv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", "")
 
@@ -39,6 +40,7 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	}
 	if cfg.DefaultTokenSaver != "safe" { t.Fatalf("default token saver = %q, want safe", cfg.DefaultTokenSaver) }
 	if cfg.MaxConcurrentRequests != 256 { t.Fatalf("max concurrent requests = %d, want 256", cfg.MaxConcurrentRequests) }
+	if cfg.MaxInflightBodyBytes != 256<<20 { t.Fatalf("max in-flight body bytes = %d, want %d", cfg.MaxInflightBodyBytes, 256<<20) }
 	if cfg.MaxConcurrentUpstreamRequests != 512 { t.Fatalf("max concurrent upstream requests = %d, want 512", cfg.MaxConcurrentUpstreamRequests) }
 	if cfg.MaxConcurrentPerProvider != 64 { t.Fatalf("max concurrent per provider = %d, want 64", cfg.MaxConcurrentPerProvider) }
 }
