@@ -123,7 +123,30 @@ export default function Home(){
 }
  async function testProvider(id:string){setBusy(true);setError("");try{const data=await request("/api/admin/providers/"+encodeURIComponent(id)+"/test",{method:"POST",body:"{}"});setNotice(data.ok?"Chat test passed · "+data.test_model+" · "+data.latency_ms+" ms":"Chat test failed · "+(data.error||data.message)+" · HTTP "+(data.chat_status||data.http_status||"—"));}catch(e){setError(e instanceof Error?e.message:"Connection test failed");}finally{setBusy(false);}}
  async function refreshModelCatalog(){setBusy(true);setError("");try{await request("/api/admin/models/refresh",{method:"POST"});await load();}catch(e){setError(e instanceof Error?e.message:"Could not refresh model catalog");}finally{setBusy(false);}}
- async function saveRoute(e:React.FormEvent){e.preventDefault();const next={...(snapshot?.routes||{}),[alias]:{provider:routeProvider,upstream_model:upstreamModel,fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),strategy:routeStrategy,sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0}};await action(async()=>{await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});setAlias("");setUpstreamModel("");setFallbackModels("");setRouteStrategy("fallback");setStickyLimit("1");},"Combo saved");}
+ async function saveRoute(e:React.FormEvent){
+  e.preventDefault();
+  const next={...(snapshot?.routes||{}),[alias]:{
+   provider:routeProvider,upstream_model:upstreamModel,
+   fallback_models:fallbackModels.split(",").map(x=>x.trim()).filter(Boolean),
+   strategy:routeStrategy,
+   sticky_limit:routeStrategy==="round-robin"?Math.max(1,Number(stickyLimit)||1):0,
+   smart_decision_provider:routeStrategy==="smart"?smartDecisionProvider:"",
+   smart_decision_model:routeStrategy==="smart"?smartDecisionModel:"",
+   smart_policy:routeStrategy==="smart"?smartPolicy:"",
+   smart_confidence:routeStrategy==="smart"?Math.min(.95,Math.max(.5,Number(smartConfidence)||.8)):0,
+   smart_timeout_seconds:routeStrategy==="smart"?Math.min(30,Math.max(1,Number(smartTimeout)||8)):0,
+   fusion_models:routeStrategy==="fusion"?fusionModels.split(/\\r?\\n|,/).map(x=>x.trim()).filter(Boolean):[],
+   judge_model:routeStrategy==="fusion"?judgeModel:"",
+   fusion_min_panel:routeStrategy==="fusion"?Math.max(2,Number(fusionMinPanel)||2):0,
+   fusion_timeout_seconds:routeStrategy==="fusion"?Math.min(180,Math.max(5,Number(fusionTimeout)||45)):0
+  }};
+  await action(async()=>{
+   await request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})});
+   setAlias("");setUpstreamModel("");setFallbackModels("");setRouteStrategy("fallback");setStickyLimit("1");
+   setSmartDecisionProvider("");setSmartDecisionModel("");setSmartPolicy("smart-switch");setSmartConfidence("0.8");setSmartTimeout("8");
+   setFusionModels("");setJudgeModel("");setFusionMinPanel("2");setFusionTimeout("45");
+  },"Combo saved");
+ }
  async function removeRoute(name:string){const next={...(snapshot?.routes||{})};delete next[name];await action(()=>request("/api/admin/routes",{method:"PUT",body:JSON.stringify({routes:next})}),"Route removed");}
  async function createKey(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");try{const data=await request("/api/admin/keys",{method:"POST",body:JSON.stringify({name:keyName})});setNewKey(data.key);setNotice("API key created. Copy it now; it will not be shown again.");await load();}catch(e){setError(e instanceof Error?e.message:"Could not create key");}finally{setBusy(false);}}
  async function saveSettings(e:React.FormEvent){e.preventDefault();await action(()=>request("/api/admin/settings",{method:"PUT",body:JSON.stringify(settings)}),"Gateway settings saved");}
