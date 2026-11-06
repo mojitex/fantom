@@ -1,4 +1,4 @@
-import http from 'k6';
+import http from 'k6/http';
 import { check, sleep } from 'k6';
 
 const baseURL = (__ENV.BASE_URL || '').replace(/\/+$/, '');
