@@ -71,8 +71,13 @@ func TestProviderRuntimeTryAcquireIsBounded(t *testing.T) {
 
 func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	upstreamStarted := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("request unexpectedly reached upstream despite body-budget rejection")
+		upstreamStarted <- struct{}{}
+		<-releaseUpstream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"body-budget-ok","choices":[]}`)
 	}))
 	defer upstream.Close()
 	handler := New(&config.Config{
@@ -82,7 +87,7 @@ func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
 		MaxConcurrentRequests: 4,
 		MaxConcurrentUpstreamRequests: 4,
 		MaxConcurrentPerProvider: 4,
-		MaxInflightBodyBytes: 16,
+		MaxInflightBodyBytes: 1 << 20,
 		Providers: []config.Provider{{
 			ID: "test", BaseURL: upstream.URL, ChatPath: "/v1/chat/completions",
 			AuthType: "none", Models: []string{"test-model"}, TimeoutSeconds: 5,
@@ -91,20 +96,57 @@ func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(handler.Close)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
-	request.Header.Set("Authorization", "Bearer client-secret")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	makeRequest := func(content string) *httptest.ResponseRecorder {
+		body := `{"model":"test-model","messages":[{"role":"user","content":"` + content + `"}]}`
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer client-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- makeRequest(strings.Repeat("a", 700<<10)) }()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		t.Fatal("first large request did not reach upstream")
+	}
 
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("body budget status = %d, want 503: %s", response.Code, response.Body.String())
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondDone <- makeRequest(strings.Repeat("b", 400<<10)) }()
+	var second *httptest.ResponseRecorder
+	select {
+	case second = <-secondDone:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		<-firstDone
+		<-secondDone
+		t.Fatal("body-budget saturated request did not fail fast")
 	}
-	if response.Header().Get("X-Fantom-Admission") != "body-budget" {
-		t.Fatalf("body budget admission header = %q", response.Header().Get("X-Fantom-Admission"))
+	if second.Code != http.StatusServiceUnavailable {
+		close(releaseUpstream)
+		<-firstDone
+		t.Fatalf("body budget status = %d, want 503: %s", second.Code, second.Body.String())
 	}
-	if response.Header().Get("Retry-After") != "1" {
-		t.Fatalf("body budget Retry-After = %q, want 1", response.Header().Get("Retry-After"))
+	if second.Header().Get("X-Fantom-Admission") != "body-budget" {
+		close(releaseUpstream)
+		<-firstDone
+		t.Fatalf("body budget admission header = %q", second.Header().Get("X-Fantom-Admission"))
+	}
+	if second.Header().Get("Retry-After") != "1" {
+		close(releaseUpstream)
+		<-firstDone
+		t.Fatalf("body budget Retry-After = %q, want 1", second.Header().Get("Retry-After"))
+	}
+	close(releaseUpstream)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusOK {
+			t.Fatalf("first large request status = %d: %s", first.Code, first.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first large request did not complete after release")
 	}
 }
 
