@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/sha256"
 	"errors"
 	"encoding/json"
 	"fmt"
@@ -149,6 +150,18 @@ func credentialCooldown(status int, retryAfter string, now time.Time) time.Durat
 	}
 }
 
+type clientIdentityContextKey struct{}
+
+type clientAdmissionSlot struct {
+	slots chan struct{}
+	refs  int
+}
+
+type clientAdmissionShard struct {
+	mu    sync.Mutex
+	slots map[[32]byte]*clientAdmissionSlot
+}
+
 type Server struct {
 	config      *config.Config
 	providersMu sync.RWMutex
@@ -174,6 +187,9 @@ type Server struct {
 	upstreamRejections  atomic.Uint64
 	providerRejections  atomic.Uint64
 	bodyBudgetRejections atomic.Uint64
+	clientRejections     atomic.Uint64
+	maxConcurrentPerClient int
+	clientSlotShards      [64]clientAdmissionShard
 }
 
 type modelItem struct {
@@ -218,6 +234,10 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	if maxConcurrentUpstream <= 0 {
 		maxConcurrentUpstream = 512
 	}
+	maxConcurrentPerClient := cfg.MaxConcurrentPerClient
+	if maxConcurrentPerClient <= 0 {
+		maxConcurrentPerClient = 32
+	}
 	maxInflightBodyBytes := cfg.MaxInflightBodyBytes
 	if maxInflightBodyBytes <= 0 {
 		maxInflightBodyBytes = 256 << 20
@@ -230,6 +250,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 		inferenceSlots: make(chan struct{}, maxConcurrent),
 		upstreamSlots: make(chan struct{}, maxConcurrentUpstream),
 		maxInflightBodyBytes: maxInflightBodyBytes,
+		maxConcurrentPerClient: maxConcurrentPerClient,
 	}
 	s.reloadProviderRuntime()
 	mux := http.NewServeMux()
@@ -513,6 +534,48 @@ func (s *Server) tryAcquireBodyBytes(requested int64) (func(), bool) {
 	}
 }
 
+// tryAcquireClient provides a bounded, per-bearer-key concurrency budget.
+// Entries are removed as soon as their final in-flight request releases its slot,
+// so the map cannot grow with the number of clients that have ever connected.
+func (s *Server) tryAcquireClient(identity [32]byte) (func(), bool) {
+	if s == nil || s.maxConcurrentPerClient <= 0 {
+		return func() {}, true
+	}
+	// Spread admission locks over independent shards so unrelated API keys do
+	// not contend on a single global mutex under high request rates.
+	shard := &s.clientSlotShards[int(identity[0])%len(s.clientSlotShards)]
+	shard.mu.Lock()
+	if shard.slots == nil {
+		shard.slots = make(map[[32]byte]*clientAdmissionSlot)
+	}
+	slot := shard.slots[identity]
+	if slot == nil {
+		slot = &clientAdmissionSlot{slots: make(chan struct{}, s.maxConcurrentPerClient)}
+		shard.slots[identity] = slot
+	}
+	slot.refs++
+	select {
+	case slot.slots <- struct{}{}:
+		shard.mu.Unlock()
+		return func() {
+			<-slot.slots
+			shard.mu.Lock()
+			slot.refs--
+			if slot.refs == 0 && shard.slots[identity] == slot {
+				delete(shard.slots, identity)
+			}
+			shard.mu.Unlock()
+		}, true
+	default:
+		slot.refs--
+		if slot.refs == 0 && shard.slots[identity] == slot {
+			delete(shard.slots, identity)
+		}
+		shard.mu.Unlock()
+		return nil, false
+	}
+}
+
 func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		maxBytes := s.config.MaxRequestBytes
@@ -522,6 +585,18 @@ func (s *Server) limitInference(next http.HandlerFunc) http.HandlerFunc {
 		if r.ContentLength > maxBytes {
 			writeAPIError(w, http.StatusRequestEntityTooLarge, "request body exceeds the configured size limit", "invalid_request_error")
 			return
+		}
+		if identity, ok := r.Context().Value(clientIdentityContextKey{}).([32]byte); ok {
+			releaseClient, acquired := s.tryAcquireClient(identity)
+			if !acquired {
+				s.inferenceRejections.Add(1)
+				s.clientRejections.Add(1)
+				w.Header().Set("Retry-After", "1")
+				w.Header().Set("X-Fantom-Admission", "client-limit")
+				writeAPIError(w, http.StatusServiceUnavailable, "client is at its configured concurrency limit; retry shortly", "service_unavailable")
+				return
+			}
+			defer releaseClient()
 		}
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
@@ -574,7 +649,9 @@ func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
 			writeAPIError(w,http.StatusUnauthorized,"missing or invalid bearer token","authentication_error")
 			return
 		}
-		next(w,r)
+		identity := sha256.Sum256([]byte(provided))
+		ctx := context.WithValue(r.Context(), clientIdentityContextKey{}, identity)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -600,6 +677,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_admissions_total counter\nfantom_inference_admissions_total %d\n", s.inferenceAdmissions.Load())
 	_, _ = fmt.Fprintf(w, "# HELP fantom_inference_rejections_total Inference requests rejected by admission control.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE fantom_inference_rejections_total counter\nfantom_inference_rejections_total %d\n", s.inferenceRejections.Load())
+	_, _ = fmt.Fprintf(w, "# HELP fantom_client_limit_rejections_total Requests rejected by per-client concurrency limits.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE fantom_client_limit_rejections_total counter\nfantom_client_limit_rejections_total %d\n", s.clientRejections.Load())
 	_, _ = fmt.Fprintf(w, "# HELP fantom_body_budget_rejections_total Requests rejected by the weighted body memory budget.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE fantom_body_budget_rejections_total counter\nfantom_body_budget_rejections_total %d\n", s.bodyBudgetRejections.Load())
 	_, _ = fmt.Fprintf(w, "# HELP fantom_upstream_admissions_total Fantom-managed upstream calls admitted.\n")

@@ -85,6 +85,7 @@ func TestMetricsEndpointRequiresAdministratorKey(t *testing.T) {
 	for _, expected := range []string{
 		"fantom_inference_limit 4",
 		"fantom_upstream_limit 8",
+		"fantom_client_limit_rejections_total 0",
 		"fantom_request_body_bytes_limit 2097152",
 		"fantom_provider_limit{provider=\"test-provider\"} 2",
 	} {
@@ -190,6 +191,90 @@ func TestInferenceAdmissionRejectsWhenBodyBudgetIsExhausted(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first large request did not complete after release")
+	}
+}
+
+
+func TestPerClientAdmissionLimitDoesNotBlockOtherClients(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	upstreamStarted := make(chan struct{}, 2)
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamStarted <- struct{}{}
+		<-releaseUpstream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"client-limit-ok","choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	handler := New(&config.Config{
+		DefaultProvider: "test",
+		GatewayAPIKeys: []string{"client-a", "client-b"},
+		MaxRequestBytes: 1 << 20,
+		MaxInflightBodyBytes: 4 << 20,
+		MaxConcurrentRequests: 4,
+		MaxConcurrentUpstreamRequests: 4,
+		MaxConcurrentPerProvider: 4,
+		MaxConcurrentPerClient: 1,
+		Providers: []config.Provider{{
+			ID: "test", BaseURL: upstream.URL, ChatPath: "/v1/chat/completions",
+			AuthType: "none", Models: []string{"test-model"}, TimeoutSeconds: 5,
+		}},
+		Routes: map[string]config.Route{},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	makeRequest := func(key string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+		request.Header.Set("Authorization", "Bearer "+key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- makeRequest("client-a") }()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		t.Fatal("first client request never reached upstream")
+	}
+
+	sameClient := makeRequest("client-a")
+	if sameClient.Code != http.StatusServiceUnavailable ||
+		sameClient.Header().Get("X-Fantom-Admission") != "client-limit" ||
+		sameClient.Header().Get("Retry-After") != "1" {
+		close(releaseUpstream)
+		<-firstDone
+		t.Fatalf("same-client request was not rejected with client admission status: %d %s", sameClient.Code, sameClient.Body.String())
+	}
+
+	otherClientDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { otherClientDone <- makeRequest("client-b") }()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		<-firstDone
+		<-otherClientDone
+		t.Fatal("independent client was blocked by another client's limit")
+	}
+
+	close(releaseUpstream)
+	for name, done := range map[string]<-chan *httptest.ResponseRecorder{
+		"first client": firstDone,
+		"second client": otherClientDone,
+	} {
+		select {
+		case response := <-done:
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s response = %d: %s", name, response.Code, response.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s request did not complete", name)
+		}
 	}
 }
 

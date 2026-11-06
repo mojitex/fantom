@@ -30,6 +30,7 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	t.Setenv("FANTOM_MAX_INFLIGHT_BODY_MB", "")
 	t.Setenv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", "")
 	t.Setenv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", "")
+	t.Setenv("FANTOM_MAX_CONCURRENT_PER_CLIENT", "")
 
 	cfg, err := Load()
 	if err != nil { t.Fatalf("Load() error = %v", err) }
@@ -44,4 +45,5 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	if cfg.MaxInflightBodyBytes != 256<<20 { t.Fatalf("max in-flight body bytes = %d, want %d", cfg.MaxInflightBodyBytes, 256<<20) }
 	if cfg.MaxConcurrentUpstreamRequests != 512 { t.Fatalf("max concurrent upstream requests = %d, want 512", cfg.MaxConcurrentUpstreamRequests) }
 	if cfg.MaxConcurrentPerProvider != 64 { t.Fatalf("max concurrent per provider = %d, want 64", cfg.MaxConcurrentPerProvider) }
+	if cfg.MaxConcurrentPerClient != 32 { t.Fatalf("max concurrent per client = %d, want 32", cfg.MaxConcurrentPerClient) }
 }
