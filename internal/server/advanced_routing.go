@@ -609,6 +609,7 @@ func (s *Server) requestSmartDecision(parent context.Context, decisionProvider *
 		releaseProvider, acquired := decisionProvider.tryAcquire()
 		if !acquired {
 			releaseUpstream()
+			s.providerRejections.Add(1)
 			continue
 		}
 		release := func() {
@@ -866,6 +867,7 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 		releaseProvider, acquired := provider.tryAcquire()
 		if !acquired {
 			releaseUpstream()
+			s.providerRejections.Add(1)
 			result.Err = fmt.Errorf("provider %s reached its concurrency limit", provider.config.ID)
 			continue
 		}
