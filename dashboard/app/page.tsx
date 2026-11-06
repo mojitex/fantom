@@ -174,7 +174,7 @@ export default function Home(){
     {page==="accounts"&&<AccountsPage request={request}/>}
     {page==="combos"&&<Routing routes={snapshot?.routes||{}} providers={snapshot?.providers||[]} alias={alias} setAlias={setAlias} routeProvider={routeProvider||snapshot?.providers?.[0]?.id||""} setRouteProvider={setRouteProvider} upstreamModel={upstreamModel} setUpstreamModel={setUpstreamModel} fallbackModels={fallbackModels} setFallbackModels={setFallbackModels} routeStrategy={routeStrategy} setRouteStrategy={setRouteStrategy} stickyLimit={stickyLimit} setStickyLimit={setStickyLimit} smartDecisionProvider={smartDecisionProvider||snapshot?.providers?.[0]?.id||""} setSmartDecisionProvider={setSmartDecisionProvider} smartDecisionModel={smartDecisionModel} setSmartDecisionModel={setSmartDecisionModel} smartPolicy={smartPolicy} setSmartPolicy={setSmartPolicy} smartConfidence={smartConfidence} setSmartConfidence={setSmartConfidence} smartTimeout={smartTimeout} setSmartTimeout={setSmartTimeout} fusionModels={fusionModels} setFusionModels={setFusionModels} judgeModel={judgeModel} setJudgeModel={setJudgeModel} fusionMinPanel={fusionMinPanel} setFusionMinPanel={setFusionMinPanel} fusionTimeout={fusionTimeout} setFusionTimeout={setFusionTimeout} onSave={saveRoute} onRemove={removeRoute}/>}
     {page==="usage"&&<UsagePage usage={usage} requests={snapshot?.requests||[]}/>}
-    {page==="settings"&&<><form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form><CoreRoutingSettings request={request}/></>}
+    {page==="settings"&&<><form onSubmit={saveSettings} className="settings-grid"><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="route"/></div><div><b>Default routing</b><span>Provider used when a model has no explicit alias.</span></div></div><label>DEFAULT PROVIDER</label><select value={settings.default_provider} onChange={e=>setSettings({...settings,default_provider:e.target.value})}>{(snapshot?.providers||[]).map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></section><section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="zap"/></div><div><b>Token optimization</b><span>Safe terminal-output normalization, applied before upstream calls.</span></div></div><label>DEFAULT TOKEN SAVER</label><select value={settings.token_saver} onChange={e=>setSettings({...settings,token_saver:e.target.value})}><option value="safe">Safe · normalize command output</option><option value="off">Off · pass through unchanged</option></select><label>CODE GENERATION MODE</label><select value={settings.code_mode} onChange={e=>setSettings({...settings,code_mode:e.target.value})}><option value="off">Off</option><option value="lite">Lite</option><option value="full">Full</option><option value="ultra">Ultra</option></select></section><section className="panel settings-panel security-panel"><div className="panel-title"><div className="icon-tile amber"><Icon name="shield"/></div><div><b>Security & persistence</b><span>Admin APIs require a gateway key. State is stored in the mounted data directory.</span></div></div><div className="info-row"><span>Persistent state file</span><code>FANTOM_DATA_DIR/fantom-state.json</code></div><div className="info-row"><span>Credential storage</span><b>Local file · restricted permissions</b></div><div className="info-row"><span>API key handling</span><b>New keys hashed at rest</b></div></section><div className="settings-save"><span>Changes are applied immediately and persisted to disk.</span><button className="primary" disabled={busy}>Save settings <Icon name="check" size={15}/></button></div></form><CoreRoutingSettings request={request}/><CapacityAdapterSettings request={request}/></>}
    </div>
    <footer className="app-footer"><span>FANTOM CONTROL PLANE <b>0.2</b></span><span>ONE ENDPOINT. TOTAL CONTROL.</span></footer>
   </main>
@@ -235,6 +235,61 @@ function AccountsPage({request}:{request:(path:string,init?:RequestInit)=>Promis
  </div>;
 }
 
+
+function CapacityAdapterSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
+ const [draft,setDraft]=useState({vision:"",pdf:"",audio_input:"",video_input:""});
+ const [loading,setLoading]=useState(false);
+ const [saving,setSaving]=useState(false);
+ const [error,setError]=useState("");
+ const [notice,setNotice]=useState("");
+ const load=useCallback(async()=>{
+  setLoading(true);setError("");
+  try{
+   const data=await request("/api/admin/capacity-adapters");
+   const adapters=data.adapters||{};
+   setDraft({
+    vision:(adapters.vision||[]).join("\\n"),
+    pdf:(adapters.pdf||[]).join("\\n"),
+    audio_input:(adapters.audio_input||[]).join("\\n"),
+    video_input:(adapters.video_input||[]).join("\\n")
+   });
+  }catch(e){setError(e instanceof Error?e.message:"Could not load capacity adapter pools");}
+  finally{setLoading(false);}
+ },[request]);
+ useEffect(()=>{void load();},[load]);
+ async function save(e:FormEvent){
+  e.preventDefault();setSaving(true);setError("");setNotice("");
+  const adapters=Object.fromEntries(Object.entries(draft).map(([key,value])=>[
+   key,value.split(/\\r?\\n|,/).map(model=>model.trim()).filter(Boolean)
+  ]));
+  try{
+   const result=await request("/api/admin/capacity-adapters",{method:"PUT",body:JSON.stringify({adapters})});
+   setNotice("Capacity adapter pools saved.");
+   setDraft({
+    vision:(result.adapters?.vision||[]).join("\\n"),
+    pdf:(result.adapters?.pdf||[]).join("\\n"),
+    audio_input:(result.adapters?.audio_input||[]).join("\\n"),
+    video_input:(result.adapters?.video_input||[]).join("\\n")
+   });
+  }catch(e){setError(e instanceof Error?e.message:"Could not save capacity adapter pools");}
+  finally{setSaving(false);}
+ }
+ return <form onSubmit={save} className="core-routing-settings">
+  <div className="page-heading compact"><div><div className="eyebrow">CAPABILITY-AWARE ROUTING</div><h2>Capacity adapter pools</h2><p>Fallback models are only prepended when none of the original candidates supports the required input modality.</p></div><button type="button" className="secondary" onClick={()=>void load()} disabled={loading||saving}><Icon name="refresh" size={14}/> Refresh</button></div>
+  {(error||notice)&&<div className={cls("alert",error?"error":"success")}><Icon name={error?"alert":"check"}/><span>{error||notice}</span><button type="button" onClick={()=>{setError("");setNotice("");}}>×</button></div>}
+  <div className="core-routing-grid">
+   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile violet"><Icon name="layers"/></div><div><b>Image & document inputs</b><span>One model ID per line. Keep each pool to models you have tested.</span></div></div>
+    <label>VISION POOL</label><textarea rows={3} value={draft.vision} onChange={e=>setDraft({...draft,vision:e.target.value})} placeholder="provider/vision-model"/>
+    <label>PDF POOL</label><textarea rows={3} value={draft.pdf} onChange={e=>setDraft({...draft,pdf:e.target.value})} placeholder="provider/pdf-model"/>
+   </section>
+   <section className="panel settings-panel"><div className="panel-title"><div className="icon-tile green"><Icon name="cpu"/></div><div><b>Audio & video inputs</b><span>These models are considered only when the incoming request includes that media type.</span></div></div>
+    <label>AUDIO INPUT POOL</label><textarea rows={3} value={draft.audio_input} onChange={e=>setDraft({...draft,audio_input:e.target.value})} placeholder="provider/audio-model"/>
+    <label>VIDEO INPUT POOL</label><textarea rows={3} value={draft.video_input} onChange={e=>setDraft({...draft,video_input:e.target.value})} placeholder="provider/video-model"/>
+   </section>
+  </div>
+  <div className="settings-save"><span>Max 16 unique model IDs per capability. Actual compatibility is checked against each model's configured capability metadata.</span><button className="primary" disabled={saving||loading}>{saving?"SAVING…":"Save capacity pools"} <Icon name="check" size={15}/></button></div>
+ </form>;
+}
 
 function CoreRoutingSettings({request}:{request:(path:string,init?:RequestInit)=>Promise<any>}){
  const [strategy,setStrategy]=useState("weighted-round-robin");
