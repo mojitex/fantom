@@ -114,6 +114,12 @@ func CompressWithHeadroom(ctx context.Context, baseURL, model string, rawMessage
 	if len(result.Messages)!=len(projected) {
 		return rawMessages, stats, errors.New("Headroom response did not preserve message count")
 	}
+	for index, expected := range projected {
+		actual := result.Messages[index]
+		if actual.Role != expected.Role || actual.ToolCallID != expected.ToolCallID {
+			return rawMessages, HeadroomStats{}, fmt.Errorf("Headroom changed message order, role or tool identity at index %d", index)
+		}
+	}
 
 	updated := make([]json.RawMessage,len(original))
 	copy(updated,original)
@@ -125,10 +131,6 @@ func CompressWithHeadroom(ctx context.Context, baseURL, model string, rawMessage
 			continue
 		}
 		actual:=result.Messages[target.index]
-		expected:=projected[target.index]
-		if actual.Role!=expected.Role || actual.ToolCallID!=expected.ToolCallID {
-			return rawMessages, HeadroomStats{}, fmt.Errorf("Headroom changed message ordering or tool identity at index %d",target.index)
-		}
 		text:=actual.Content
 		// Never accept empty or expanded text as a compression result.
 		if strings.TrimSpace(text)=="" || len(text)>=len(target.content) || text==target.content { continue }
