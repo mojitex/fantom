@@ -79,6 +79,12 @@ type requestRecord struct {
 	UpstreamAttempts int       `json:"upstream_attempts,omitempty"`
 	CredentialRetries int      `json:"credential_retries,omitempty"`
 	FallbackAttempts int       `json:"fallback_attempts,omitempty"`
+	DecisionPromptTokens int64  `json:"-"`
+	DecisionCompletionTokens int64 `json:"-"`
+	DecisionTotalTokens int64    `json:"-"`
+	DecisionCostUSD float64      `json:"-"`
+	DecisionCostKnown bool       `json:"-"`
+	DecisionUsageSeen bool       `json:"-"`
 	Engine           string    `json:"engine,omitempty"`
 	Account           string    `json:"account,omitempty"`
 	TTFTMS            int64     `json:"ttft_ms,omitempty"`
