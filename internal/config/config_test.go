@@ -25,6 +25,9 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "oc_sk_test")
 	t.Setenv("FANTOM_TOKEN_SAVER", "safe")
 	t.Setenv("FANTOM_CODE_MODE", "off")
+	t.Setenv("FANTOM_MAX_CONCURRENT_REQUESTS", "")
+	t.Setenv("FANTOM_MAX_CONCURRENT_UPSTREAM_REQUESTS", "")
+	t.Setenv("FANTOM_MAX_CONCURRENT_PER_PROVIDER", "")
 
 	cfg, err := Load()
 	if err != nil { t.Fatalf("Load() error = %v", err) }
@@ -35,4 +38,7 @@ func TestLoadSupportsDistinctProviderModelEndpoint(t *testing.T) {
 		t.Fatalf("OpenCode Console provider was not loaded: %#v", second)
 	}
 	if cfg.DefaultTokenSaver != "safe" { t.Fatalf("default token saver = %q, want safe", cfg.DefaultTokenSaver) }
+	if cfg.MaxConcurrentRequests != 256 { t.Fatalf("max concurrent requests = %d, want 256", cfg.MaxConcurrentRequests) }
+	if cfg.MaxConcurrentUpstreamRequests != 512 { t.Fatalf("max concurrent upstream requests = %d, want 512", cfg.MaxConcurrentUpstreamRequests) }
+	if cfg.MaxConcurrentPerProvider != 64 { t.Fatalf("max concurrent per provider = %d, want 64", cfg.MaxConcurrentPerProvider) }
 }
