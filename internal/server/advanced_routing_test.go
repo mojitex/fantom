@@ -125,6 +125,34 @@ func TestCapacityAdapterLegacyArrayMigrationAndRoundRobinPool(t *testing.T) {
 	}
 }
 
+func TestCapacityPoolPolicyIsPersistedAndNormalized(t *testing.T) {
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+	store, err := newAdminStore(&config.Config{
+		DefaultProvider:"main",
+		Providers:[]config.Provider{{ID:"main",BaseURL:"https://example.invalid/v1",AuthType:"none",Models:[]string{"*"}}},
+	}, slog.New(slog.NewTextHandler(io.Discard,nil)))
+	if err!=nil { t.Fatalf("newAdminStore() error = %v",err) }
+	defer store.Close()
+	if err:=store.setCapacityAdapters(map[string]capacityAdapterPool{
+		"vision":{Enabled:true,RoundRobin:true,Models:[]string{"main/vision-a"," main/vision-a ","main/vision-b"}},
+		"pdf":{Enabled:true,RoundRobin:true,Models:nil},
+	});err!=nil { t.Fatalf("setCapacityAdapters() error = %v",err) }
+	pools:=store.snapshot().CapacityAdapters
+	if !pools["vision"].Enabled || !pools["vision"].RoundRobin || len(pools["vision"].Models)!=2 {
+		t.Fatalf("vision pool settings were not normalized: %#v",pools["vision"])
+	}
+	if pools["pdf"].Enabled || pools["pdf"].RoundRobin || len(pools["pdf"].Models)!=0 {
+		t.Fatalf("empty pool should be disabled: %#v",pools["pdf"])
+	}
+	raw,err:=json.Marshal(store.snapshot())
+	if err!=nil { t.Fatalf("marshal capacity settings: %v",err) }
+	var reloaded adminState
+	if err:=json.Unmarshal(raw,&reloaded);err!=nil { t.Fatalf("unmarshal capacity settings: %v",err) }
+	if !reloaded.CapacityAdapters["vision"].RoundRobin || len(reloaded.CapacityAdapters["vision"].Models)!=2 {
+		t.Fatalf("capacity policy did not survive state serialization: %#v",reloaded.CapacityAdapters["vision"])
+	}
+}
+
 func TestSmartStrictLockSelectsOncePerSession(t *testing.T) {
 	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
 	var decisions atomic.Int64
