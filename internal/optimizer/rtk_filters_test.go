@@ -68,6 +68,57 @@ func TestRTKCompactsGitStatusAndLSTable(t *testing.T) {
 	}
 }
 
+func TestRTKCompactsGitLogAndBuildOutput(t *testing.T) {
+	gitLog:=strings.Join([]string{
+		"commit abcdef0123456789abcdef0123456789abcdef01",
+		"Author: Dev <dev@example.com>",
+		"Date:   Fri Nov 6 12:00:00 2026 +0330",
+		"",
+		"    Add structured output filtering",
+		"",
+		"    This long body is intentionally verbose and should be omitted by the compact log view.",
+		"    More explanatory details that are not needed in the model context.",
+		" 3 files changed, 120 insertions(+), 30 deletions(-)",
+		"diff --git a/a.go b/a.go",
+		"+ source line",
+		"commit 1234567890abcdef1234567890abcdef12345678",
+		"Author: Another Dev",
+		"",
+		"    Fix edge case",
+		" 1 file changed, 2 insertions(+)",
+	},"\n")
+	if got:=detectRTKFilter(gitLog);got!="git-log" {t.Fatalf("git log detected as %q",got)}
+	gitLogOutput:=compactGitLog(gitLog)
+	if len(gitLogOutput)>=len(gitLog) ||
+		!strings.Contains(gitLogOutput,"abcdef0123456789abcdef0123456789abcdef01") ||
+		!strings.Contains(gitLogOutput,"Subject: Add structured output filtering") ||
+		!strings.Contains(gitLogOutput,"3 files changed") ||
+		!strings.Contains(gitLogOutput,"diff body omitted") ||
+		strings.Contains(gitLogOutput,"long body is intentionally") {
+		t.Fatalf("git log compacting lost metadata or retained body: %s",gitLogOutput)
+	}
+
+	build:=strings.Join([]string{
+		"Compiling crate_a v1.0.0",
+		"Compiling crate_b v1.0.0",
+		"Downloading crate_c",
+		"warning: unused variable",
+		"  --> src/main.rs:10:5",
+		"  |",
+		"10 | let unused = 1;",
+		"error[E0308]: mismatched types",
+		"  --> src/lib.rs:20:3",
+		"  | expected String, found integer",
+		"Finished dev profile [unoptimized + debuginfo] target(s) in 3.2s",
+	},"\n")
+	if got:=detectRTKFilter(build);got!="build-output" {t.Fatalf("build output detected as %q",got)}
+	buildOutput:=compactBuildOutput(build)
+	for _,want:=range []string{"Compiled 2 packages","Downloaded 1 packages","warning: unused variable","error[E0308]: mismatched types","Finished dev profile"} {
+		if !strings.Contains(buildOutput,want) {t.Errorf("build summary missing %q: %s",want,buildOutput)}
+	}
+	if len(buildOutput)>=len(build) {t.Fatalf("build output did not shrink: before=%d after=%d",len(build),len(buildOutput))}
+}
+
 func TestRTKHandlesWindowsGrepAndLongFormUntrackedGitStatus(t *testing.T) {
 	windowsGrep:=strings.Join([]string{
 		"C:\\workspace\\repo\\main.go:10:"+strings.Repeat("match context ",12),
