@@ -178,7 +178,13 @@ func New(cfg *config.Config, logger *slog.Logger) *Server {
 	store, err := newAdminStore(cfg, logger)
 	if err != nil {
 		logger.Error("could not initialize persistent admin state", "error", err)
-		store = &adminStore{path:"./data/fantom-state.json", data:adminState{Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode}}
+		store = &adminStore{path:"./data/fantom-state.json", data:adminState{
+			Version:1,DefaultProvider:cfg.DefaultProvider,Routes:cfg.Routes,
+			DefaultTokenSaver:cfg.DefaultTokenSaver,DefaultCodeMode:cfg.DefaultCodeMode,
+			DefaultCavemanMode:cfg.DefaultCavemanMode,HeadroomEnabled:cfg.HeadroomEnabled,
+			HeadroomURL:cfg.HeadroomURL,HeadroomTimeoutSeconds:cfg.HeadroomTimeoutSeconds,
+			HeadroomCompressUserMessages:cfg.HeadroomCompressUserMessages,HeadroomSettingsConfigured:true,
+		}}
 		for _,p := range cfg.Providers { store.data.Providers=append(store.data.Providers,persistProvider(p)) }
 	}
 	s := &Server{config: cfg, providers: make(map[string]*providerRuntime), store:store, logger: logger}
