@@ -146,14 +146,19 @@ type Server struct {
 	core          CoreRouter
 	requestID     atomic.Uint64
 	routeCursors  sync.Map // map[public combo model]*atomic.Uint64
+	smartSessions sync.Map // map[combo:session]*smartSessionEntry
+	smartSessionSweeps atomic.Uint64
 	coreUsageCancel context.CancelFunc
 	coreUsageDone   chan struct{}
 }
 
 type modelItem struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	OwnedBy string `json:"owned_by"`
+	ID            string                   `json:"id"`
+	Object        string                   `json:"object"`
+	OwnedBy       string                   `json:"owned_by"`
+	Capabilities  config.ModelCapabilities `json:"capabilities,omitempty"`
+	ContextWindow int                      `json:"context_window,omitempty"`
+	MaxOutput     int                      `json:"max_output,omitempty"`
 }
 
 type upstreamModelList struct {
