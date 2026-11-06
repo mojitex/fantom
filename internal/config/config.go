@@ -28,6 +28,7 @@ type Route struct {
 	Provider       string   `json:"provider"`
 	UpstreamModel  string   `json:"upstream_model"`
 	FallbackModels []string `json:"fallback_models,omitempty"`
+	Strategy       string   `json:"strategy,omitempty"`
 }
 
 type Config struct {
