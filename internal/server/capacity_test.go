@@ -16,6 +16,45 @@ import (
 	"github.com/mojitex/fantom/internal/config"
 )
 
+
+func TestUpstreamAdmissionAndWeightedBodyBudget(t *testing.T) {
+	server := &Server{
+		upstreamSlots: make(chan struct{}, 1),
+		maxInflightBodyBytes: 10,
+	}
+	releaseUpstream, ok := server.tryAcquireUpstream()
+	if !ok {
+		t.Fatal("first upstream admission unexpectedly failed")
+	}
+	if _, ok := server.tryAcquireUpstream(); ok {
+		t.Fatal("second upstream admission exceeded the global limit")
+	}
+	releaseUpstream()
+	if _, ok := server.tryAcquireUpstream(); !ok {
+		t.Fatal("upstream slot was not released")
+	}
+	// Release the verification acquire before testing byte accounting.
+	releaseUpstream, _ = server.tryAcquireUpstream()
+	if releaseUpstream != nil {
+		// The first release above freed one slot; release the slot acquired here.
+		releaseUpstream()
+	}
+
+	releaseBody, ok := server.tryAcquireBodyBytes(7)
+	if !ok {
+		t.Fatal("first weighted body reservation unexpectedly failed")
+	}
+	if _, ok := server.tryAcquireBodyBytes(4); ok {
+		t.Fatal("body budget allowed reservations above its configured maximum")
+	}
+	releaseBody()
+	releaseBody, ok = server.tryAcquireBodyBytes(10)
+	if !ok {
+		t.Fatal("body reservation did not recover after release")
+	}
+	releaseBody()
+}
+
 func TestProviderRuntimeTryAcquireIsBounded(t *testing.T) {
 	provider := newProviderRuntime(config.Provider{ID: "bounded"}, 1)
 	release, ok := provider.tryAcquire()
