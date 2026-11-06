@@ -77,7 +77,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case "bootstrap":
 			if r.Method!=http.MethodGet { methodNotAllowed(w); return }
 			state:=s.store.snapshot()
-			writeJSON(w,http.StatusOK,map[string]any{"service":"Fantom","version":"0.2","status":"online","default_provider":state.DefaultProvider,"providers":providerViews(state.Providers),"routes":state.Routes,"settings":map[string]any{"token_saver":state.DefaultTokenSaver,"code_mode":state.DefaultCodeMode,"capacity_adapters":state.CapacityAdapters},"keys":s.store.listKeys(),"usage":s.usageSummary(state.Requests),"requests":tailRequests(state.Requests,30)})
+			writeJSON(w,http.StatusOK,map[string]any{"service":"Fantom","version":"0.2","status":"online","default_provider":state.DefaultProvider,"providers":providerViews(state.Providers),"routes":state.Routes,"settings":map[string]any{
+				"token_saver":state.DefaultTokenSaver,"code_mode":state.DefaultCodeMode,
+				"caveman_mode":state.DefaultCavemanMode,
+				"headroom_enabled":state.HeadroomEnabled,"headroom_url":state.HeadroomURL,
+				"headroom_timeout_seconds":state.HeadroomTimeoutSeconds,
+				"headroom_compress_user_messages":state.HeadroomCompressUserMessages,
+				"capacity_adapters":state.CapacityAdapters,
+			},"keys":s.store.listKeys(),"usage":s.usageSummary(state.Requests),"requests":tailRequests(state.Requests,30)})
 			return
 		case "routes":
 			switch r.Method {
@@ -106,12 +113,40 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		case "settings":
 			switch r.Method {
 			case http.MethodGet:
-				st:=s.store.snapshot(); writeJSON(w,http.StatusOK,map[string]any{"default_provider":st.DefaultProvider,"token_saver":st.DefaultTokenSaver,"code_mode":st.DefaultCodeMode})
+				st:=s.store.snapshot()
+				writeJSON(w,http.StatusOK,map[string]any{
+					"default_provider":st.DefaultProvider,"token_saver":st.DefaultTokenSaver,"code_mode":st.DefaultCodeMode,
+					"caveman_mode":st.DefaultCavemanMode,"headroom_enabled":st.HeadroomEnabled,
+					"headroom_url":st.HeadroomURL,"headroom_timeout_seconds":st.HeadroomTimeoutSeconds,
+					"headroom_compress_user_messages":st.HeadroomCompressUserMessages,
+				})
 			case http.MethodPut:
-				var body struct { DefaultProvider string `json:"default_provider"`; TokenSaver string `json:"token_saver"`; CodeMode string `json:"code_mode"` }
+				var body struct {
+					DefaultProvider string `json:"default_provider"`
+					TokenSaver string `json:"token_saver"`
+					CodeMode string `json:"code_mode"`
+					CavemanMode *string `json:"caveman_mode"`
+					HeadroomEnabled *bool `json:"headroom_enabled"`
+					HeadroomURL *string `json:"headroom_url"`
+					HeadroomTimeoutSeconds *int `json:"headroom_timeout_seconds"`
+					HeadroomCompressUserMessages *bool `json:"headroom_compress_user_messages"`
+				}
 				if !decodeAdminJSON(w,r,&body) { return }
-				if err:=s.store.setSettings(body.DefaultProvider,body.TokenSaver,body.CodeMode); err!=nil { adminError(w,http.StatusBadRequest,err.Error()); return }
-				writeJSON(w,http.StatusOK,map[string]any{"ok":true})
+				current:=s.store.snapshot()
+				caveman:=current.DefaultCavemanMode
+				if body.CavemanMode!=nil { caveman=*body.CavemanMode }
+				headroomEnabled:=current.HeadroomEnabled
+				if body.HeadroomEnabled!=nil { headroomEnabled=*body.HeadroomEnabled }
+				headroomURL:=current.HeadroomURL
+				if body.HeadroomURL!=nil { headroomURL=*body.HeadroomURL }
+				headroomTimeout:=current.HeadroomTimeoutSeconds
+				if body.HeadroomTimeoutSeconds!=nil { headroomTimeout=*body.HeadroomTimeoutSeconds }
+				compressUsers:=current.HeadroomCompressUserMessages
+				if body.HeadroomCompressUserMessages!=nil { compressUsers=*body.HeadroomCompressUserMessages }
+				if err:=s.store.setAdvancedSettings(body.DefaultProvider,body.TokenSaver,body.CodeMode,caveman,headroomEnabled,headroomURL,headroomTimeout,compressUsers); err!=nil {
+					adminError(w,http.StatusBadRequest,err.Error()); return
+				}
+				writeJSON(w,http.StatusOK,map[string]any{"ok":true,"settings":s.store.snapshot()})
 			default: methodNotAllowed(w)
 			}
 			return
