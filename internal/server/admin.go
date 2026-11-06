@@ -41,7 +41,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			if !decodeAdminJSON(w, r, &body) { return }
 			if body.Adapters == nil { body.Adapters = map[string]capacityAdapterPool{} }
 			if err := s.store.setCapacityAdapters(body.Adapters); err != nil { adminError(w, http.StatusBadRequest, err.Error()); return }
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": body.Adapters})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "adapters": s.store.snapshot().CapacityAdapters})
 		default: methodNotAllowed(w)
 		}
 		return
