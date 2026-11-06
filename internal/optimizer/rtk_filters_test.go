@@ -154,7 +154,12 @@ func TestRTKHandlesWindowsGrepAndLongFormUntrackedGitStatus(t *testing.T) {
 func TestRTKCompactsTreeSearchListAndLongFileReads(t *testing.T) {
 	tree:=strings.Join([]string{"project","├── src","│  ├── main.go","│  └── util.go","└── tests","3 directories, 2 files",""},"\n")
 	if got:=detectRTKFilter(tree);got!="tree" {t.Fatalf("tree filter detection = %q",got)}
-	if strings.Contains(compactTree(tree),"3 directories") {t.Fatal("tree summary line was not removed")}
+	treeOutput:=compactTree(tree)
+	if strings.Contains(treeOutput,"3 directories") {t.Fatal("tree summary line was not removed")}
+	fileTree:="project\\n└── directory_file_notes.txt\\n3 directories, 2 files"
+	if got:=compactTree(fileTree);!strings.Contains(got,"directory_file_notes.txt") {
+		t.Fatalf("tree filter removed a path that merely contains summary words: %s",got)
+	}
 
 	search:=[]string{"Result of search in 'src' (total 24 files):"}
 	for i:=0;i<24;i++ {search=append(search,fmt.Sprintf("- src/generated/deep/long/path/module_%02d_component_file.go",i))}

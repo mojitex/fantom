@@ -100,7 +100,7 @@ func detectRTKFilter(text string) string {
 	case rtkSearchRE.MatchString(head):
 		return "search-list"
 	}
-	if len(lines) >= rtkSmartMinLines && isMostlyNumbered(lines) {
+	if strings.Count(text, "\n")+1 >= rtkSmartMinLines && isMostlyNumbered(lines) {
 		return "read-numbered"
 	}
 	if len(nonEmpty) >= 5 {
@@ -628,9 +628,9 @@ func noiseEntry(name string) bool {
 func compactTree(input string) string {
 	lines := strings.Split(input, "\n")
 	out := make([]string, 0, len(lines))
+	summaryRE:=regexp.MustCompile("^\\s*\\d+\\s+directories?,\\s+\\d+\\s+files?\\s*$")
 	for _, line := range lines {
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "director") && strings.Contains(lower, "file") {
+		if summaryRE.MatchString(line) {
 			continue
 		}
 		if strings.TrimSpace(line) == "" && len(out) == 0 {
