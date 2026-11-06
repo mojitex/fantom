@@ -30,12 +30,12 @@ const (
 var (
 	rtkDiffHeaderRE = regexp.MustCompile("^diff --git ")
 	rtkDiffHunkRE   = regexp.MustCompile("^@@ ")
-	rtkGitCommitRE  = regexp.MustCompile("^(commit [0-9a-fA-F]{7,40}|[*|/\\\\ ]+commit [0-9a-fA-F]{7,40})$")
-	rtkGitOnelineRE = regexp.MustCompile("^([*|/\\\\ ]*[0-9a-fA-F]{7,40}\\\\s+.+)$")
-	rtkGitGraphRE   = regexp.MustCompile("^[*|/\\\\ ]+$")
-	rtkBuildCompileRE = regexp.MustCompile("(?i)^\\\\s*(Compiling|Downloading|Fetching)\\\\s+\\\\S+")
-	rtkBuildErrorRE = regexp.MustCompile("(?i)^(npm (ERR!|error)|yarn error|error(\\\\[|:)|ERROR:|\\\\[ERROR\\\\]|BUILD FAILED)")
-	rtkBuildWarnRE = regexp.MustCompile("(?i)^(npm warn|yarn warn|warning(\\\\[|:)|\\\\[WARNING\\\\])")
+	rtkGitCommitRE  = regexp.MustCompile("^(commit [0-9a-fA-F]{7,40}|[*|/\\ ]+commit [0-9a-fA-F]{7,40})$")
+	rtkGitOnelineRE = regexp.MustCompile("^([*|/\\ ]*[0-9a-fA-F]{7,40}\\s+.+)$")
+	rtkGitGraphRE   = regexp.MustCompile("^[*|/\\ ]+$")
+	rtkBuildCompileRE = regexp.MustCompile("(?i)^\\s*(Compiling|Downloading|Fetching)\\s+\\S+")
+	rtkBuildErrorRE = regexp.MustCompile("(?i)^(npm (ERR!|error)|yarn error|error(\\[|:)|ERROR:|\\[ERROR\\]|BUILD FAILED)")
+	rtkBuildWarnRE = regexp.MustCompile("(?i)^(npm warn|yarn warn|warning(\\[|:)|\\[WARNING\\])")
 	rtkStatusRE     = regexp.MustCompile("^(On branch |nothing to commit|Changes (not |to be )|Untracked files:)")
 	rtkPorcelainRE  = regexp.MustCompile("^[ MADRCU?!][ MADRCU?!] \\S")
 	rtkLSRowRE      = regexp.MustCompile("(?m)^[-dlbcps][rwx-]{9}")
@@ -226,16 +226,16 @@ func compactGitLog(input string) string {
 			continue
 		}
 		if inCommit {
-			if regexp.MustCompile("^[*|/\\\\\\\\ ]*(Author|Date):").MatchString(trimmed) {
+			if regexp.MustCompile("^[*|/\\ ]*(Author|Date):").MatchString(trimmed) {
 				push(trimmed)
 				continue
 			}
-			if !subjectSeen && regexp.MustCompile("^[*|/\\\\\\\\ ]*    \\\\\\\\S").MatchString(line) {
+			if !subjectSeen && regexp.MustCompile("^[*|/\\ ]*    \\S").MatchString(line) {
 				push("  Subject: "+trimmed)
 				subjectSeen=true
 				continue
 			}
-			if regexp.MustCompile("^\\\\\\\\d+ files? changed").MatchString(trimmed) {
+			if regexp.MustCompile("^\\d+ files? changed").MatchString(trimmed) {
 				push("  "+trimmed)
 				continue
 			}
@@ -266,7 +266,7 @@ func compactBuildOutput(input string) string {
 	summary:=[]string{}
 	compiling,downloading:=0,0
 	inError:=false
-	continuationRE:=regexp.MustCompile("^\\\\\\\\s*(-->|\\\\\\\\||[0-9]+\\\\\\\\s*\\\\\\\\||=)")
+	continuationRE:=regexp.MustCompile("^\\s*(-->|\\||[0-9]+\\s*\\||=)")
 	deprecationRE:=regexp.MustCompile("(?i)^npm warn deprecated")
 	for _,line:=range lines {
 		trimmed:=strings.TrimSpace(line)
