@@ -107,7 +107,7 @@ func (s *Server) handleCoreCallback(w http.ResponseWriter, r *http.Request) {
 // already known by one of Fantom's legacy providers. It never performs a network
 // catalog refresh while deciding which runtime should own an inference request.
 func (s *Server) legacyModelMatch(_ context.Context, model string) bool {
-	state := s.store.snapshot()
+	state := s.store.routingSnapshot()
 	if _, ok := state.Routes[model]; ok {
 		return true
 	}
