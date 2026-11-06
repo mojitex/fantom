@@ -954,7 +954,6 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 	w.Header().Set("X-Fantom-Fusion-Panel-Successes",fmt.Sprint(len(successful)))
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
 	if string(payload["stream"])=="true" {
-		includeUsage:=false
 		var streamOptions struct { IncludeUsage bool `json:"include_usage"` }
 		if raw:=payload["stream_options"];len(raw)>0 { _=json.Unmarshal(raw,&streamOptions) }
 		writeFusionSSE(w,comboName,finalText,totalPrompt,totalCompletion,totalTokens,streamOptions.IncludeUsage)
