@@ -680,6 +680,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		for name,value:=range payload { attemptPayload[name]=value }
 		modelJSON,_:=json.Marshal(target.UpstreamModel)
 		attemptPayload["model"]=modelJSON
+		if isCapacityAdapterModel(candidateModel,required,state) {
+			caps:=s.candidateCapabilities(candidateModel,state,providerMap)
+			trimmed,removed:=stripHistoryForContext(attemptPayload,caps.ContextWindow)
+			if removed>0 {
+				attemptPayload=trimmed
+				w.Header().Set("X-Fantom-Capacity-History-Messages-Dropped",fmt.Sprint(removed))
+			}
+		}
 		attemptBody,marshalErr:=json.Marshal(attemptPayload)
 		if marshalErr!=nil { writeAPIError(w,http.StatusBadRequest,"could not encode routed request","invalid_request_error"); return }
 		attemptBody,optimizationStats:=optimizer.Apply(attemptBody,saverMode,codeMode)
