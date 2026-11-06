@@ -812,7 +812,7 @@ func extractFusionUsage(body []byte) fusionUsage {
 	return u
 }
 
-func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request, payload map[string]json.RawMessage, model string, state adminState, providers map[string]config.Provider, saverMode, codeMode string) fusionPanelResult {
+func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request, payload map[string]json.RawMessage, model string, state adminState, providers map[string]config.Provider, saverMode, codeMode, cavemanMode string) fusionPanelResult {
 	result:=fusionPanelResult{Model:model}
 	target,err:=resolveCandidate(model,state,providers)
 	if err!=nil { result.Err=err; return result }
@@ -825,7 +825,7 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 	modelJSON,_:=json.Marshal(target.UpstreamModel)
 	attemptPayload["model"]=modelJSON
 	attemptBody,_:=json.Marshal(attemptPayload)
-	attemptBody,_=optimizer.Apply(attemptBody,saverMode,codeMode)
+	attemptBody,_=optimizer.Apply(attemptBody,saverMode,codeMode,cavemanMode)
 
 	for _,key:=range provider.apiKeysForRequest() {
 		if provider.config.AuthType=="bearer"&&key=="" { break }
@@ -861,7 +861,7 @@ func (s *Server) requestFusionModel(ctx context.Context, incoming *http.Request,
 	return result
 }
 
-func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, state adminState, providers map[string]config.Provider, record *requestRecord, saverMode, codeMode string) {
+func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payload map[string]json.RawMessage, comboName string, route config.Route, state adminState, providers map[string]config.Provider, record *requestRecord, saverMode, codeMode, cavemanMode string) {
 	timeout:=time.Duration(route.FusionTimeoutSeconds)*time.Second
 	if timeout<=0 { timeout=45*time.Second }
 	ctx,cancel:=context.WithTimeout(r.Context(),timeout)
@@ -875,7 +875,7 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		wg.Add(1)
 		go func(){
 			defer wg.Done()
-			results<-s.requestFusionModel(ctx,r,panelPayload,model,state,providers,saverMode,codeMode)
+			results<-s.requestFusionModel(ctx,r,panelPayload,model,state,providers,saverMode,codeMode,cavemanMode)
 		}()
 	}
 	go func(){wg.Wait();close(results)}()
@@ -927,7 +927,7 @@ func (s *Server) handleFusionChat(w http.ResponseWriter, r *http.Request, payloa
 		judgePayload["messages"]=encodedMessages
 		judgePayload["model"],_=json.Marshal(judgeModel)
 		judgePayload["stream"]=json.RawMessage("false")
-		judgeResult:=s.requestFusionModel(ctx,r,judgePayload,judgeModel,state,providers,"off","off")
+		judgeResult:=s.requestFusionModel(ctx,r,judgePayload,judgeModel,state,providers,"off","off",cavemanMode)
 		attempts+=judgeResult.Attempts
 		if judgeResult.Err==nil&&judgeResult.Text!="" {
 			finalText=judgeResult.Text

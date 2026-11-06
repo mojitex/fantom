@@ -126,8 +126,14 @@ type adminState struct {
 	Providers          []persistedProvider     `json:"providers"`
 	Routes             map[string]config.Route `json:"routes"`
 	CapacityAdapters   map[string]capacityAdapterPool `json:"capacity_adapters,omitempty"`
-	DefaultTokenSaver  string                  `json:"default_token_saver"`
-	DefaultCodeMode    string                  `json:"default_code_mode"`
+	DefaultTokenSaver             string `json:"default_token_saver"`
+	DefaultCodeMode               string `json:"default_code_mode"`
+	DefaultCavemanMode            string `json:"default_caveman_mode,omitempty"`
+	HeadroomEnabled               bool   `json:"headroom_enabled,omitempty"`
+	HeadroomURL                   string `json:"headroom_url,omitempty"`
+	HeadroomTimeoutSeconds        int    `json:"headroom_timeout_seconds,omitempty"`
+	HeadroomCompressUserMessages  bool   `json:"headroom_compress_user_messages,omitempty"`
+	HeadroomSettingsConfigured    bool   `json:"headroom_settings_configured,omitempty"`
 	ClientKeys         []storedClientKey       `json:"client_keys"`
 	Requests           []requestRecord         `json:"requests"`
 }
@@ -149,7 +155,13 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 	if dir == "" { dir = "./data" }
 	path := filepath.Join(dir, "fantom-state.json")
 	store := &adminStore{path:path, logger:logger}
-	store.data = adminState{Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes, DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode}
+	store.data = adminState{
+		Version:1, DefaultProvider:cfg.DefaultProvider, Routes:cfg.Routes,
+		DefaultTokenSaver:cfg.DefaultTokenSaver, DefaultCodeMode:cfg.DefaultCodeMode,
+		DefaultCavemanMode:cfg.DefaultCavemanMode, HeadroomEnabled:cfg.HeadroomEnabled,
+		HeadroomURL:cfg.HeadroomURL, HeadroomTimeoutSeconds:cfg.HeadroomTimeoutSeconds,
+		HeadroomCompressUserMessages:cfg.HeadroomCompressUserMessages, HeadroomSettingsConfigured:true,
+	}
 	for _, p := range cfg.Providers { store.data.Providers = append(store.data.Providers, persistProvider(p)) }
 	if store.data.Routes == nil { store.data.Routes = map[string]config.Route{} }
 	if store.data.CapacityAdapters == nil { store.data.CapacityAdapters = map[string]capacityAdapterPool{} }
@@ -162,6 +174,14 @@ func newAdminStore(cfg *config.Config, logger *slog.Logger) (*adminStore, error)
 		if loaded.CapacityAdapters == nil { loaded.CapacityAdapters = map[string]capacityAdapterPool{} }
 		if loaded.DefaultTokenSaver == "" { loaded.DefaultTokenSaver = cfg.DefaultTokenSaver }
 		if loaded.DefaultCodeMode == "" { loaded.DefaultCodeMode = cfg.DefaultCodeMode }
+		if !loaded.HeadroomSettingsConfigured {
+			loaded.DefaultCavemanMode=cfg.DefaultCavemanMode
+			loaded.HeadroomEnabled=cfg.HeadroomEnabled
+			loaded.HeadroomURL=cfg.HeadroomURL
+			loaded.HeadroomTimeoutSeconds=cfg.HeadroomTimeoutSeconds
+			loaded.HeadroomCompressUserMessages=cfg.HeadroomCompressUserMessages
+			loaded.HeadroomSettingsConfigured=true
+		}
 		if len(loaded.Providers) == 0 { loaded.Providers = store.data.Providers }
 		if loaded.DefaultProvider == "" { loaded.DefaultProvider = cfg.DefaultProvider }
 		store.data = loaded
@@ -350,12 +370,42 @@ func (d *adminStore) setCapacityAdapters(adapters map[string]capacityAdapterPool
 }
 
 func (d *adminStore) setSettings(defaultProvider, saver, code string) error {
-	d.mu.Lock(); defer d.mu.Unlock()
-	found:=false; for _,p:=range d.data.Providers { if p.ID==defaultProvider { found=true; break } }
+	state:=d.snapshot()
+	return d.setAdvancedSettings(defaultProvider,saver,code,state.DefaultCavemanMode,state.HeadroomEnabled,state.HeadroomURL,state.HeadroomTimeoutSeconds,state.HeadroomCompressUserMessages)
+}
+
+func (d *adminStore) setAdvancedSettings(defaultProvider, saver, code, caveman string, headroomEnabled bool, headroomURL string, headroomTimeoutSeconds int, compressUserMessages bool) error {
+	defaultProvider=strings.TrimSpace(defaultProvider)
+	saver=strings.ToLower(strings.TrimSpace(saver))
+	code=strings.ToLower(strings.TrimSpace(code))
+	caveman=strings.ToLower(strings.TrimSpace(caveman))
+	headroomURL=strings.TrimSpace(headroomURL)
+	if caveman=="" { caveman="off" }
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	found:=false
+	for _,p:=range d.data.Providers { if p.ID==defaultProvider { found=true; break } }
 	if !found { return errors.New("default provider does not exist") }
 	if saver!="safe" && saver!="off" { return errors.New("token saver must be safe or off") }
 	if code!="off" && code!="lite" && code!="full" && code!="ultra" { return errors.New("code mode must be off, lite, full or ultra") }
-	d.data.DefaultProvider=defaultProvider; d.data.DefaultTokenSaver=saver; d.data.DefaultCodeMode=code
+	if caveman!="off" && caveman!="lite" && caveman!="full" && caveman!="ultra" { return errors.New("Caveman mode must be off, lite, full or ultra") }
+	if headroomTimeoutSeconds<=0 { headroomTimeoutSeconds=3 }
+	if headroomTimeoutSeconds>30 { return errors.New("Headroom timeout must be between 1 and 30 seconds") }
+	if headroomEnabled {
+		u,err:=url.ParseRequestURI(headroomURL)
+		if err!=nil || u.Host=="" || (u.Scheme!="http" && u.Scheme!="https") || u.User!=nil {
+			return errors.New("Headroom URL must be an http or https URL without embedded credentials")
+		}
+	}
+	d.data.DefaultProvider=defaultProvider
+	d.data.DefaultTokenSaver=saver
+	d.data.DefaultCodeMode=code
+	d.data.DefaultCavemanMode=caveman
+	d.data.HeadroomEnabled=headroomEnabled
+	d.data.HeadroomURL=headroomURL
+	d.data.HeadroomTimeoutSeconds=headroomTimeoutSeconds
+	d.data.HeadroomCompressUserMessages=compressUserMessages
+	d.data.HeadroomSettingsConfigured=true
 	return d.saveLocked()
 }
 func (d *adminStore) appendRequest(row requestRecord) {
