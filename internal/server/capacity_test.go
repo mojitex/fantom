@@ -1,0 +1,157 @@
+package server
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/mojitex/fantom/internal/config"
+)
+
+func TestProviderRuntimeTryAcquireIsBounded(t *testing.T) {
+	provider := newProviderRuntime(config.Provider{ID: "bounded"}, 1)
+	release, ok := provider.tryAcquire()
+	if !ok {
+		t.Fatal("first acquire unexpectedly failed")
+	}
+	if _, ok := provider.tryAcquire(); ok {
+		t.Fatal("second acquire exceeded the configured provider limit")
+	}
+	release()
+	releaseAgain, ok := provider.tryAcquire()
+	if !ok {
+		t.Fatal("acquire after release unexpectedly failed")
+	}
+	releaseAgain()
+}
+
+func TestInferenceAdmissionRejectsAtGlobalLimit(t *testing.T) {
+	assertConcurrentAdmission(t, 1, 4, "global")
+}
+
+func TestInferenceAdmissionRejectsAtProviderLimit(t *testing.T) {
+	assertConcurrentAdmission(t, 2, 1, "provider")
+}
+
+func assertConcurrentAdmission(t *testing.T, maxRequests, maxPerProvider int, limitKind string) {
+	t.Helper()
+	t.Setenv("FANTOM_DATA_DIR", t.TempDir())
+
+	upstreamStarted := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamStarted <- struct{}{}
+		<-releaseUpstream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"capacity-ok","choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		DefaultProvider: "test",
+		GatewayAPIKeys: []string{"client-secret"},
+		MaxRequestBytes: 1 << 20,
+		MaxConcurrentRequests: maxRequests,
+		MaxConcurrentUpstreamRequests: 4,
+		MaxConcurrentPerProvider: maxPerProvider,
+		Providers: []config.Provider{{
+			ID: "test", BaseURL: upstream.URL, ChatPath: "/v1/chat/completions",
+			AuthType: "none", Models: []string{"test-model"}, TimeoutSeconds: 5,
+		}},
+		Routes: map[string]config.Route{},
+	}
+	handler := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(handler.Close)
+
+	makeRequest := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`))
+		request.Header.Set("Authorization", "Bearer client-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- makeRequest() }()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseUpstream)
+		t.Fatal("first request never reached the upstream")
+	}
+
+	second := makeRequest()
+	if second.Code != http.StatusServiceUnavailable {
+		close(releaseUpstream)
+		t.Fatalf("%s saturation status = %d, want 503: %s", limitKind, second.Code, second.Body.String())
+	}
+	if got := second.Header().Get("Retry-After"); got != "1" {
+		close(releaseUpstream)
+		t.Fatalf("%s saturation Retry-After = %q, want 1", limitKind, got)
+	}
+	if limitKind == "global" && second.Header().Get("X-Fantom-Admission") != "rejected" {
+		close(releaseUpstream)
+		t.Fatal("global admission rejection header is missing")
+	}
+
+	close(releaseUpstream)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, want 200: %s", first.Code, first.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not complete after upstream release")
+	}
+}
+
+func TestStreamBodyWithUsageParsesSSEIncrementally(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	record := &requestRecord{}
+	largeEvent := "data:" + strings.Repeat("x", maxSSEUsageLine) + "\n"
+	usageEvent := "data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":11,\"total_tokens\":18}}\n\n"
+	input := largeEvent + usageEvent
+	response := httptest.NewRecorder()
+
+	server.streamBodyWithUsage(response, strings.NewReader(input), record, "text/event-stream")
+
+	if response.Body.String() != input {
+		t.Fatal("SSE body was changed while extracting usage")
+	}
+	if record.PromptTokens != 7 || record.CompletionTokens != 11 || record.TotalTokens != 18 {
+		t.Fatalf("incremental usage was not extracted: %+v", record)
+	}
+}
+
+func TestAdminStoreRingBufferRetainsNewestHistoryInOrder(t *testing.T) {
+	store := &adminStore{data: adminState{
+		Routes: map[string]config.Route{"fast": {Provider: "test", UpstreamModel: "model"}},
+		Requests: make([]requestRecord, 0, 5000),
+		ClientKeys: []storedClientKey{{ID: "key-1"}},
+	}}
+	rows := make([]requestRecord, 5003)
+	for i := range rows {
+		rows[i] = requestRecord{ID: fmt.Sprint(i)}
+	}
+	store.appendRequests(rows)
+
+	snapshot := store.snapshot()
+	if len(snapshot.Requests) != 5000 {
+		t.Fatalf("retained requests = %d, want 5000", len(snapshot.Requests))
+	}
+	if snapshot.Requests[0].ID != "3" || snapshot.Requests[len(snapshot.Requests)-1].ID != "5002" {
+		t.Fatalf("request history is not ordered oldest-to-newest: first=%q last=%q",
+			snapshot.Requests[0].ID, snapshot.Requests[len(snapshot.Requests)-1].ID)
+	}
+	routing := store.routingSnapshot()
+	if routing.Requests != nil || routing.ClientKeys != nil {
+		t.Fatal("routing snapshot unexpectedly copied request history or client keys")
+	}
+	if len(routing.Routes) != 1 {
+		t.Fatalf("routing snapshot lost routes: %#v", routing.Routes)
+	}
+}
