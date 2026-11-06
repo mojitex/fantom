@@ -105,6 +105,25 @@ func TestCompressWithHeadroomFailsOpenOnHTTPOrProjectionMismatch(t *testing.T) {
 	}
 }
 
+func TestHeadroomRejectsRoleChangesOnNonTextMessages(t *testing.T) {
+	proxy:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"messages":[]map[string]string{
+				{"role":"user","content":"short"},
+				{"role":"tool","tool_call_id":"call-1","content":""},
+			},
+		})
+	}))
+	defer proxy.Close()
+	original,_:=json.Marshal([]map[string]any{
+		{"role":"user","content":"a very long user message"},
+		{"role":"assistant","content":"","tool_calls":[]any{map[string]any{"id":"call-1","type":"function"}}},
+	})
+	compressed,_,err:=CompressWithHeadroom(context.Background(),proxy.URL,"test-model",original,time.Second,true)
+	if err==nil {t.Fatal("Headroom role change on non-text message was accepted")}
+	if string(compressed)!=string(original) {t.Fatalf("role mismatch did not fail open: %s",compressed)}
+}
+
 func TestHeadroomEndpointRejectsCredentialsAndInvalidSchemes(t *testing.T) {
 	for _,value:=range []string{"ftp://example.com","https://user:pass@example.com","not a URL"} {
 		if _,err:=headroomEndpoint(value);err==nil { t.Errorf("headroomEndpoint(%q) unexpectedly succeeded",value) }
