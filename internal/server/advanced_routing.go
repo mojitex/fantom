@@ -15,6 +15,7 @@ import (
 
 	"github.com/mojitex/fantom/internal/config"
 	"github.com/mojitex/fantom/internal/routing"
+	"github.com/mojitex/fantom/internal/optimizer"
 )
 
 type requiredCapabilitySet map[string]bool
@@ -73,7 +74,6 @@ func requiredCapabilities(payload map[string]json.RawMessage) requiredCapability
 			required["video_input"] = true
 		}
 	}
-	scanBlock := func(block any) {}
 	var scanAny func(any)
 	scanAny = func(value any) {
 		switch item := value.(type) {
@@ -106,7 +106,6 @@ func requiredCapabilities(payload map[string]json.RawMessage) requiredCapability
 			for _, child := range item { scanAny(child) }
 		}
 	}
-	_ = scanBlock
 
 	if raw := payload["tools"]; len(raw) > 0 && string(raw) != "null" && string(raw) != "[]" {
 		required["tools"] = true
@@ -514,8 +513,14 @@ func containsString(items []string, value string) bool {
 }
 
 func moveCandidateFirst(items []string, value string) []string {
-	out:=make([]string,0,len(items))
-	for _,item:=range items { if item==value { return append([]string{value},append(out,items[len(out)+1:]...)...) } else { out=append(out,item) } }
+	for index, item := range items {
+		if item != value { continue }
+		out := make([]string, 0, len(items))
+		out = append(out, value)
+		out = append(out, items[:index]...)
+		out = append(out, items[index+1:]...)
+		return out
+	}
 	return items
 }
 
