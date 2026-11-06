@@ -198,3 +198,23 @@
 .setting-toggle input{width:16px;height:16px;accent-color:#8b7cf6}
 .field-hint{font:8px var(--mono);color:var(--dim);letter-spacing:0;text-transform:none}
 @media(max-width:900px){.core-routing-grid{grid-template-columns:1fr}}
+
+
+/* Quota visualization and advanced routing editor controls */
+.quota-meter{display:grid;gap:5px;min-width:140px}
+.quota-meter>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.quota-meter>div:first-child b{color:#c8d0df;font:9px var(--mono)}
+.quota-meter .bar-track{height:5px}
+.quota-model{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:8px 0;border-top:1px solid var(--line);font-size:9px}
+.quota-model span{overflow-wrap:anywhere;color:#c3ccdc}
+.quota-model b{font:9px var(--mono);color:#c8d0df}
+.quota-model .bar-track,.quota-model small{grid-column:1/-1}
+.quota-model small{color:var(--dim)}
+.quota-cell details+details{margin-top:5px;padding-top:5px;border-top:1px solid var(--line)}
+.advanced-fields textarea,.combo-advanced-fields textarea,.core-routing-grid .settings-panel>textarea{width:100%;min-height:66px;padding:9px 10px;resize:vertical;border:1px solid var(--line2);border-radius:7px;background:#0c121b;color:var(--text);font:9px/1.55 var(--mono)}
+.advanced-fields textarea:focus,.combo-advanced-fields textarea:focus,.core-routing-grid .settings-panel>textarea:focus{outline:1px solid #7162bd;border-color:#7162bd}
+.combo-advanced-fields{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:8px;background:#0d131d}
+.combo-advanced-fields small{color:var(--dim);font-size:9px;line-height:1.55}
+.combo-advanced-fields>label{margin-top:4px}
+.metrics-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:760px){.metrics-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}}
