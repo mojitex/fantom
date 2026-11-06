@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -525,8 +526,10 @@ func TestLegacyAdminStateInheritsHeadroomDefaultsOnlyOnce(t *testing.T) {
 	legacy.HeadroomEnabled=false
 	legacy.HeadroomURL=""
 	legacy.HeadroomTimeoutSeconds=0
-	if err:=store.saveLegacyStateForTest(legacy);err!=nil {t.Fatal(err)}
 	store.Close()
+	raw,err:=json.Marshal(legacy)
+	if err!=nil {t.Fatal(err)}
+	if err:=os.WriteFile(store.path,raw,0600);err!=nil {t.Fatal(err)}
 
 	reloaded,err:=newAdminStore(cfg,logger)
 	if err!=nil {t.Fatalf("reload legacy store: %v",err)}
