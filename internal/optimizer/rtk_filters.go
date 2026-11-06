@@ -28,14 +28,14 @@ var (
 	rtkDiffHeaderRE = regexp.MustCompile("^diff --git ")
 	rtkDiffHunkRE   = regexp.MustCompile("^@@ ")
 	rtkStatusRE     = regexp.MustCompile("^(On branch |nothing to commit|Changes (not |to be )|Untracked files:)")
-	rtkPorcelainRE  = regexp.MustCompile("^[ MADRCU?!][ MADRCU?!] \\\\S")
+	rtkPorcelainRE  = regexp.MustCompile("^[ MADRCU?!][ MADRCU?!] \\S")
 	rtkLSRowRE      = regexp.MustCompile("^[-dlbcps][rwx-]{9}")
-	rtkLSTotalRE    = regexp.MustCompile("^total \\\\d+$")
+	rtkLSTotalRE    = regexp.MustCompile("^total \\d+$")
 	rtkTreeGlyphRE  = regexp.MustCompile("[├└]──|│  ")
-	rtkSearchRE     = regexp.MustCompile("^Result of search in '[^']*' \\\\(total \\\\d+ files?\\\\):")
-	rtkNumberedRE   = regexp.MustCompile("^\\\\s*\\\\d+\\\\|")
-	rtkDateRE       = regexp.MustCompile("\\\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\\\s+\\\\d{1,2}\\\\s+(\\\\d{4}|\\\\d{2}:\\\\d{2})\\\\s+")
-	rtkWindowsPathRE = regexp.MustCompile("^[A-Za-z]:[\\\\\\\\/]")
+	rtkSearchRE     = regexp.MustCompile("^Result of search in '[^']*' \\(total \\d+ files?\\):")
+	rtkNumberedRE   = regexp.MustCompile("^\\s*\\d+\\|")
+	rtkDateRE       = regexp.MustCompile("\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2}\\s+(\\d{4}|\\d{2}:\\d{2})\\s+")
+	rtkWindowsPathRE = regexp.MustCompile("^[A-Za-z]:[\\\\/]")
 )
 
 type rtkLineMatch struct {
@@ -179,7 +179,7 @@ func isPathLikeRTK(line string) bool {
 	if strings.Contains(value, ":") {
 		return false
 	}
-	return strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.ContainsAny(value, "/\\\\")
+	return strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.ContainsAny(value, "/\\")
 }
 
 func compactGitDiff(input string) string {
@@ -258,8 +258,8 @@ func compactGitStatus(input string) string {
 	branch := ""
 	stagedFiles, modifiedFiles, untrackedFiles := []string{}, []string{}, []string{}
 	staged, modified, untracked, conflicts := 0, 0, 0, 0
-	longBranchRE := regexp.MustCompile("^On branch (\\\\S+)")
-	longFileRE := regexp.MustCompile("^\\\\s*(modified|new file|deleted|renamed|both modified):\\\\s+(.+)$")
+	longBranchRE := regexp.MustCompile("^On branch (\\S+)")
+	longFileRE := regexp.MustCompile("^\\s*(modified|new file|deleted|renamed|both modified):\\s+(.+)$")
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
 		if strings.TrimSpace(line) == "" {
@@ -381,7 +381,7 @@ func compactFind(input string) string {
 	}
 	byDir := map[string][]string{}
 	for _, file := range lines {
-		dir, base := path.Split(strings.ReplaceAll(file, "\\\\", "/"))
+		dir, base := path.Split(strings.ReplaceAll(file, "\\", "/"))
 		dir = strings.TrimSuffix(dir, "/")
 		if dir == "" {
 			dir = "."
@@ -547,7 +547,7 @@ func compactSearchList(input string) string {
 	}
 	byDir := map[string][]string{}
 	for _, value := range paths {
-		dir, base := path.Split(strings.ReplaceAll(value, "\\\\", "/"))
+		dir, base := path.Split(strings.ReplaceAll(value, "\\", "/"))
 		dir = strings.TrimSuffix(dir, "/")
 		if dir == "" {
 			dir = "."
