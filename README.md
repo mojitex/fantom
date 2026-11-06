@@ -31,6 +31,27 @@ Fantom is a self-hosted AI routing platform with a Go gateway, an embedded Go pr
 - Headroom and Caveman can be configured in Settings or through `FANTOM_HEADROOM_*` and `FANTOM_CAVEMAN_MODE` environment variables. `X-Fantom-Token-Saver: off` bypasses Headroom and RTK for a request; `X-Fantom-Caveman-Mode` can override Caveman per request.
 - Bearer-key authentication, request IDs, health endpoint and structured logs.
 
+### Optional Headroom service
+
+Headroom is an optional external text-compression service. Install and run it separately:
+
+```bash
+pip install "headroom-ai[proxy]"
+headroom proxy --port 8787
+```
+
+Then open Dashboard → Settings → Enable Headroom and set the base URL. Fantom appends `/v1/compress` automatically. The default timeout is 3 seconds (maximum 30 seconds). Compression failures, timeouts, malformed responses and responses that do not reduce text fail open: the original request continues to the provider.
+
+Network address examples:
+
+- Fantom and Headroom on the same host process network: `http://localhost:8787`.
+- Fantom and Headroom in the same Docker Compose network: `http://headroom:8787` (use the actual service name).
+- Headroom running on the Docker host while Fantom runs in a container: `http://host.docker.internal:8787` where supported by the Docker runtime.
+
+By default, only text that Headroom returns shorter is applied, and user-authored messages are never rewritten unless **Compress user messages** is explicitly enabled. Tool-call IDs, ordering, roles and original tool-call metadata are validated/preserved. The current Fantom integration targets OpenAI-compatible Chat Completions `messages[]`; it does not yet project every native Claude, Gemini or Responses payload format.
+
+Caveman is local prompt injection and needs no external service. Configure Lite, Full or Ultra in Dashboard → Settings, or override one request with `X-Fantom-Caveman-Mode: lite|full|ultra|off`. It preserves the user's language and treats code, identifiers, URLs, errors, safety warnings and ordered instructions as hard boundaries.
+
 ### Embedded Go routing engine
 
 Fantom now embeds the MIT-licensed [CLIProxyAPI Go SDK](https://github.com/router-for-me/CLIProxyAPI) as an in-process service with a private loopback listener. Fantom remains the public gateway: it validates application keys before proxying inference traffic, while the embedded engine owns provider executors, OAuth credential files, token refresh, account selection, protocol compatibility and native streaming.
